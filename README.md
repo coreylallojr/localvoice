@@ -27,7 +27,7 @@ cd localvoice
 
 You can also download the packaged Windows build from the repository's Releases page and run `LocalVoice.exe`; Python is not required for that build.
 
-For system-wide microphone use, install a virtual audio cable. Select its playback/input endpoint as LocalVoice's **Output / cable**, then select the cable's recording/output endpoint as the microphone in Discord, OBS, a browser, or a game.
+For system-wide microphone use, install the signed, open-source [Virtual Audio Driver](https://github.com/VirtualDrivers/Virtual-Audio-Driver/releases/latest) or another virtual cable. Select its playback/input endpoint as LocalVoice's **Output / cable**, then select the cable's recording/output endpoint as the microphone in Discord, OBS, a browser, or a game. LocalVoice automatically prefers recognized virtual-cable outputs.
 
 ## Hotkeys
 

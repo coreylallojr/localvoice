@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tkinter as tk
+import webbrowser
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -253,7 +254,18 @@ class LocalVoiceApp:
             if not self.input_var.get() and self.inputs:
                 self.input_var.set(self.inputs[0].label)
             if not self.output_var.get() and self.outputs:
-                self.output_var.set(self.outputs[0].label)
+                virtual = next(
+                    (
+                        item
+                        for item in self.outputs
+                        if any(
+                            term in item.name.casefold()
+                            for term in ("virtual audio", "cable input", "vb-audio")
+                        )
+                    ),
+                    self.outputs[0],
+                )
+                self.output_var.set(virtual.label)
         except PortAudioError as error:
             self.status_var.set(f"Could not enumerate audio devices: {error}")
 
@@ -467,12 +479,16 @@ class LocalVoiceApp:
         temporary.replace(self.settings_path)
 
     def show_cable_help(self) -> None:
-        messagebox.showinfo(
+        open_page = messagebox.askyesno(
             "Virtual microphone setup",
             "LocalVoice sends processed audio to the output you select. Install a virtual audio cable, select its playback/input side here, then select its recording/output side as the microphone in Discord, OBS, a game, or a browser.\n\n"
-            "If no cable appears in the device list, install one and press Refresh. VB-CABLE and open SysVAD-based drivers both work.",
+            "If no cable appears in the device list, install one and press Refresh.\n\nOpen the signed, open-source Virtual Audio Driver download page now?",
             parent=self.root,
         )
+        if open_page:
+            webbrowser.open(
+                "https://github.com/VirtualDrivers/Virtual-Audio-Driver/releases/latest"
+            )
 
     def update_meters(self) -> None:
         self.input_meter["value"] = min(1, self.engine.input_level * 2)
