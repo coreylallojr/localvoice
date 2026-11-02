@@ -23,7 +23,25 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -e . pyinstaller
-      - run: pyinstaller --noconfirm --clean --onefile --windowed --name LocalVoice-windows-x64 --collect-all pedalboard --collect-all pystray --collect-all sounddevice localvoice/__main__.py
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --name LocalVoice-windows-x64 --collect-all pedalboard --collect-all pystray --collect-all sounddevice localvoice_launcher.py
+      - name: Smoke-test packaged app
+        shell: pwsh
+        run: |
+          $app = Start-Process .\dist\LocalVoice-windows-x64.exe -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(15)
+            do {
+              Start-Sleep -Seconds 1
+              $windows = @(Get-Process LocalVoice-windows-x64 -ErrorAction SilentlyContinue)
+              if ($windows.MainWindowTitle -match "Unhandled exception") {
+                throw "Packaged app opened an unhandled-exception window"
+              }
+              $started = $windows.MainWindowTitle -contains "LocalVoice"
+            } until ($started -or (Get-Date) -ge $deadline)
+            if (-not $started) { throw "Packaged app did not open the LocalVoice window" }
+          } finally {
+            Get-Process LocalVoice-windows-x64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: LocalVoice-windows-x64
