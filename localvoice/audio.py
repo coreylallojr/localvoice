@@ -34,7 +34,7 @@ class AudioDevice:
 
     @property
     def label(self) -> str:
-        return f"{self.index}: {self.name} [{self.host_api}]"
+        return f"{self.name} [{self.host_api}]"
 
 
 def list_devices() -> tuple[list[AudioDevice], list[AudioDevice]]:
@@ -125,6 +125,9 @@ class AudioEngine:
         output_device: int,
         character: Character,
         monitor_device: int | None = None,
+        *,
+        muted: bool = False,
+        bypass: bool = False,
     ) -> int:
         self.stop()
         sample_rate = self._choose_sample_rate(
@@ -134,6 +137,13 @@ class AudioEngine:
         self.error = ""
         self.xruns = 0
         self.sample_rate = sample_rate
+        self.muted = muted
+        self.bypass = bypass
+        while True:
+            try:
+                self.commands.get_nowait()
+            except queue.Empty:
+                break
         self.stream = sd.Stream(
             device=(input_device, output_device),
             samplerate=sample_rate,
@@ -263,27 +273,36 @@ class AudioEngine:
             self.input_level = float(np.max(np.abs(source), initial=0))
             if status:
                 self.xruns += 1
-            if self.muted:
-                output = np.zeros_like(source)
-            elif self.bypass:
-                output = source
+            if self.bypass:
+                processed_output = source
             else:
+                # shortcut: PitchShift buffers short streaming calls; reset per block
+                # until the planned streaming-engine adapter replaces it.
                 processed = self.board(
-                    source[np.newaxis, :], self.sample_rate, reset=False
+                    source[np.newaxis, :],
+                    self.sample_rate,
+                    buffer_size=len(source),
+                    reset=True,
                 )
-                output = np.asarray(processed).reshape(-1)[: len(source)]
-            np.clip(output, -1, 1, out=output)
-            outdata[:, 0] = output
-            self.output_level = float(np.max(np.abs(output), initial=0))
+                rendered = np.asarray(processed).reshape(-1)
+                processed_output = np.zeros_like(source)
+                count = min(len(source), len(rendered))
+                processed_output[:count] = rendered[:count]
+            np.clip(processed_output, -1, 1, out=processed_output)
+            transmitted_output = (
+                np.zeros_like(processed_output) if self.muted else processed_output
+            )
+            outdata[:, 0] = transmitted_output
+            self.output_level = float(np.max(np.abs(processed_output), initial=0))
             if self.monitor_stream and self.monitor_stream.active:
                 try:
-                    self.monitor_queue.put_nowait(output.copy())
+                    self.monitor_queue.put_nowait(processed_output.copy())
                 except queue.Full:
                     try:
                         self.monitor_queue.get_nowait()
                     except queue.Empty:
                         pass
-                    self.monitor_queue.put_nowait(output.copy())
+                    self.monitor_queue.put_nowait(processed_output.copy())
         except Exception as error:  # noqa: BLE001 - fail silent so the raw voice never leaks.
             outdata.fill(0)
             self.error = str(error)

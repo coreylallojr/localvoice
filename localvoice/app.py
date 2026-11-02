@@ -19,7 +19,8 @@ from .hotkeys import Hotkeys, normalize_ptt_key
 from .tray import Tray
 
 DEFAULT_SETTINGS = {
-    "ptt_enabled": True,
+    "settings_version": 2,
+    "ptt_enabled": False,
     "ptt_key": "f8",
     "ptt_mode": "hold",
     "close_to_tray": True,
@@ -204,14 +205,23 @@ class LocalVoiceApp:
         self.root.minsize(720, 620)
         self.store = CharacterStore()
         self.settings_path = self.store.root / "settings.json"
-        self.settings = DEFAULT_SETTINGS | self._load_settings()
+        loaded_settings = self._load_settings()
+        if loaded_settings.get("settings_version", 0) < 2:
+            loaded_settings.update(
+                settings_version=2, ptt_enabled=False, monitor_enabled=False
+            )
+        self.settings = DEFAULT_SETTINGS | loaded_settings
         self.characters = self.store.load()
         self.engine = AudioEngine()
         self.inputs: list[AudioDevice] = []
         self.outputs: list[AudioDevice] = []
+        self.input_choices: list[AudioDevice] = []
+        self.virtual_outputs: list[AudioDevice] = []
+        self.monitor_outputs: list[AudioDevice] = []
         self.tray: Tray | None = None
         self.hotkeys: Hotkeys | None = None
         self.quitting = False
+        self.auditioning = False
 
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
@@ -226,10 +236,12 @@ class LocalVoiceApp:
         self.ptt_enabled_var = tk.BooleanVar(value=self.settings["ptt_enabled"])
         self.monitor_enabled_var = tk.BooleanVar(value=self.settings["monitor_enabled"])
         self.ptt_status_var = tk.StringVar()
+        self.setup_status_var = tk.StringVar()
 
         self._build_ui()
         self.refresh_devices()
         self._restore_selections()
+        self._save_settings()
         self.start_hotkeys()
         self.tray = Tray(
             lambda action: self.root.after(0, action),
@@ -264,7 +276,7 @@ class LocalVoiceApp:
             frame, text="Your voice, processed locally, in every Windows app"
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 18))
 
-        ttk.Label(frame, text="1. Your microphone").grid(
+        ttk.Label(frame, text="1. Mic you speak into").grid(
             row=2, column=0, sticky="w", pady=5
         )
         self.input_box = ttk.Combobox(
@@ -275,18 +287,26 @@ class LocalVoiceApp:
             row=2, column=2
         )
 
-        ttk.Label(frame, text="2. Virtual microphone").grid(
+        ttk.Label(frame, text="2. Send changed voice to").grid(
             row=3, column=0, sticky="w", pady=5
         )
+        output_panel = ttk.Frame(frame)
+        output_panel.grid(row=3, column=1, sticky="ew", padx=8)
         self.output_box = ttk.Combobox(
-            frame, textvariable=self.output_var, state="readonly"
+            output_panel, textvariable=self.output_var, state="readonly"
         )
-        self.output_box.grid(row=3, column=1, sticky="ew", padx=8)
-        ttk.Button(frame, text="Cable help", command=self.show_cable_help).grid(
+        self.output_box.pack(fill="x")
+        ttk.Label(
+            output_panel,
+            textvariable=self.setup_status_var,
+            foreground="#9c2f00",
+            wraplength=470,
+        ).pack(fill="x", pady=(3, 0))
+        ttk.Button(frame, text="Set up", command=self.show_cable_help).grid(
             row=3, column=2
         )
 
-        ttk.Label(frame, text="3. Your headphones").grid(
+        ttk.Label(frame, text="3. Hear yourself through").grid(
             row=4, column=0, sticky="w", pady=5
         )
         self.monitor_box = ttk.Combobox(
@@ -294,7 +314,7 @@ class LocalVoiceApp:
         )
         self.monitor_box.grid(row=4, column=1, sticky="ew", padx=8)
         self.monitor_button = ttk.Button(
-            frame, text="HEAR MY VOICE", command=self.test_my_voice
+            frame, text="TEST IN HEADPHONES", command=self.test_my_voice
         )
         self.monitor_button.grid(row=4, column=2)
 
@@ -358,7 +378,9 @@ class LocalVoiceApp:
         self.input_meter.grid(
             row=10, column=1, columnspan=2, sticky="ew", padx=8, pady=(18, 3)
         )
-        ttk.Label(frame, text="Output").grid(row=11, column=0, sticky="e", pady=3)
+        ttk.Label(frame, text="Changed voice").grid(
+            row=11, column=0, sticky="e", pady=3
+        )
         self.output_meter = ttk.Progressbar(frame, maximum=1)
         self.output_meter.grid(
             row=11, column=1, columnspan=2, sticky="ew", padx=8, pady=3
@@ -393,53 +415,92 @@ class LocalVoiceApp:
     def refresh_devices(self) -> None:
         try:
             self.inputs, self.outputs = list_devices()
-            self.input_box["values"] = [item.label for item in self.inputs]
-            self.output_box["values"] = [item.label for item in self.outputs]
-            self.monitor_box["values"] = [item.label for item in self.outputs]
+            self.input_choices = self._prefer_wasapi(self.inputs)
+            self.virtual_outputs = self._prefer_wasapi(
+                [item for item in self.outputs if self._is_virtual(item)]
+            )
+            self.monitor_outputs = self._prefer_wasapi(
+                [item for item in self.outputs if not self._is_virtual(item)]
+            )
+            self.input_box["values"] = [item.label for item in self.input_choices]
+            self.output_box["values"] = [item.label for item in self.virtual_outputs]
+            self.monitor_box["values"] = [item.label for item in self.monitor_outputs]
             default_input, default_output = sd.default.device
-            if not self.input_var.get() and self.inputs:
-                selected = next(
-                    (item for item in self.inputs if item.index == default_input),
-                    self.inputs[0],
+            if (
+                self.input_var.get() not in self.input_box["values"]
+                and self.input_choices
+            ):
+                selected = self._matching_default(
+                    self.input_choices, self.inputs, default_input
                 )
                 self.input_var.set(selected.label)
-            if not self.output_var.get() and self.outputs:
-                virtual = next(
-                    (item for item in self.outputs if self._is_virtual(item)),
-                    next(
-                        (item for item in self.outputs if item.index == default_output),
-                        self.outputs[0],
-                    ),
+            if self.virtual_outputs:
+                if self.output_var.get() not in self.output_box["values"]:
+                    self.output_var.set(self.virtual_outputs[0].label)
+                self.setup_status_var.set(
+                    "Virtual microphone ready. Select its recording side in your app."
                 )
-                self.output_var.set(virtual.label)
-            if not self.monitor_var.get() and self.outputs:
-                monitor = next(
-                    (
-                        item
-                        for item in self.outputs
-                        if item.index == default_output and not self._is_virtual(item)
-                    ),
-                    next(
-                        (item for item in self.outputs if not self._is_virtual(item)),
-                        self.outputs[0],
-                    ),
+                self.live_button.configure(text="GO LIVE")
+            else:
+                self.output_var.set("Virtual microphone not installed")
+                self.setup_status_var.set(
+                    "Required for Discord, games, OBS, and calls. Click Set up."
+                )
+                self.live_button.configure(text="SET UP VIRTUAL MIC TO GO LIVE")
+            if (
+                self.monitor_var.get() not in self.monitor_box["values"]
+                and self.monitor_outputs
+            ):
+                monitor = self._matching_default(
+                    self.monitor_outputs, self.outputs, default_output
                 )
                 self.monitor_var.set(monitor.label)
         except PortAudioError as error:
             self.status_var.set(f"Could not enumerate audio devices: {error}")
 
     @staticmethod
+    def _prefer_wasapi(devices: list[AudioDevice]) -> list[AudioDevice]:
+        wasapi = [item for item in devices if "WASAPI" in item.host_api.upper()]
+        return wasapi or devices
+
+    @staticmethod
+    def _matching_default(
+        choices: list[AudioDevice], all_devices: list[AudioDevice], default_index: int
+    ) -> AudioDevice:
+        default = next(
+            (item for item in all_devices if item.index == default_index), None
+        )
+        if default:
+            match = next(
+                (
+                    item
+                    for item in choices
+                    if item.name.casefold() == default.name.casefold()
+                ),
+                None,
+            )
+            if match:
+                return match
+        return choices[0]
+
+    @staticmethod
     def _is_virtual(device: AudioDevice) -> bool:
         return any(
             term in device.name.casefold()
-            for term in ("virtual audio", "cable input", "vb-audio")
+            for term in (
+                "virtual audio",
+                "virtual mic",
+                "cable input",
+                "vb-audio",
+                "voicemeeter input",
+            )
         )
 
     def _restore_selections(self) -> None:
         for variable, key, devices in (
-            (self.input_var, "input", self.inputs),
-            (self.output_var, "output", self.outputs),
-            (self.monitor_var, "monitor", self.outputs),
+            (self.input_var, "input", self.input_choices),
+            (self.output_var, "output", self.virtual_outputs),
+            (self.monitor_var, "monitor", self.monitor_outputs),
         ):
             wanted = self.settings.get(key)
             match = next((item.label for item in devices if item.label == wanted), None)
@@ -456,8 +517,11 @@ class LocalVoiceApp:
         )
 
     @staticmethod
-    def _device_index(label: str) -> int:
-        return int(label.split(":", 1)[0])
+    def _device_index(label: str, devices: list[AudioDevice], description: str) -> int:
+        selected = next((item for item in devices if item.label == label), None)
+        if not selected:
+            raise ValueError(f"Choose {description} first.")
+        return selected.index
 
     def start_hotkeys(self) -> None:
         if self.hotkeys:
@@ -500,7 +564,7 @@ class LocalVoiceApp:
         self._save_settings()
 
     def ptt_press(self) -> None:
-        if not self.ptt_enabled_var.get():
+        if self.auditioning or not self.ptt_enabled_var.get():
             return
         if not self.engine.running and not self.start_live():
             return
@@ -512,44 +576,64 @@ class LocalVoiceApp:
             self.status_var.set("TRANSMITTING - release the push-to-talk key to mute.")
 
     def ptt_release(self) -> None:
-        if self.ptt_enabled_var.get() and self.settings["ptt_mode"] == "hold":
+        if (
+            not self.auditioning
+            and self.ptt_enabled_var.get()
+            and self.settings["ptt_mode"] == "hold"
+        ):
             self.mute_var.set(True)
             self.apply_mute()
             self.status_var.set("Push to talk ready - output muted.")
 
     def toggle_live(self) -> None:
+        if self.auditioning:
+            self.stop_preview()
         if self.engine.running:
             self.stop_live()
         else:
             self.start_live()
 
     def start_live(self) -> bool:
+        if not self.virtual_outputs:
+            self.status_var.set(
+                "A virtual microphone is required to send audio to other apps. "
+                "Headphone testing works without it."
+            )
+            self.show_cable_help()
+            return False
         try:
-            output_index = self._device_index(self.output_var.get())
+            output_index = self._device_index(
+                self.output_var.get(), self.virtual_outputs, "a virtual microphone"
+            )
             monitor_index = (
-                self._device_index(self.monitor_var.get())
+                self._device_index(
+                    self.monitor_var.get(), self.monitor_outputs, "your headphones"
+                )
                 if self.monitor_var.get()
                 else None
             )
             use_monitor = (
                 self.monitor_enabled_var.get() and monitor_index != output_index
             )
+            if self.ptt_enabled_var.get():
+                self.mute_var.set(True)
             rate = self.engine.start(
-                self._device_index(self.input_var.get()),
+                self._device_index(
+                    self.input_var.get(), self.input_choices, "the microphone you use"
+                ),
                 output_index,
                 self.current_character(),
                 monitor_index if use_monitor else None,
+                muted=self.mute_var.get(),
+                bypass=self.bypass_var.get(),
             )
-            self.engine.set_bypass(self.bypass_var.get())
-            if self.ptt_enabled_var.get():
-                self.mute_var.set(True)
-            self.engine.set_muted(self.mute_var.get())
+            self.auditioning = False
             self.live_var.set(True)
             self.live_button.configure(text="STOP")
             self.monitor_button.configure(
-                text="STOP HEARING"
+                text="STOP HEADPHONE MONITOR"
                 if self.monitor_enabled_var.get()
-                else "HEAR MY VOICE"
+                else "TEST IN HEADPHONES"
             )
             self.status_var.set(
                 f"LIVE at {rate:,} Hz. "
@@ -568,17 +652,24 @@ class LocalVoiceApp:
 
     def stop_live(self) -> None:
         self.engine.stop()
+        self.auditioning = False
         self.live_var.set(False)
-        self.live_button.configure(text="GO LIVE")
-        self.monitor_button.configure(text="HEAR MY VOICE")
+        self.monitor_enabled_var.set(False)
+        self.settings["monitor_enabled"] = False
+        self.live_button.configure(
+            text="GO LIVE" if self.virtual_outputs else "SET UP VIRTUAL MIC TO GO LIVE"
+        )
+        self.monitor_button.configure(text="TEST IN HEADPHONES")
         self.status_var.set("Stopped.")
+        self._save_settings()
 
     def toggle_mute(self) -> None:
         self.mute_var.set(not self.mute_var.get())
         self.apply_mute()
 
     def apply_mute(self) -> None:
-        self.engine.set_muted(self.mute_var.get())
+        if not self.auditioning:
+            self.engine.set_muted(self.mute_var.get())
 
     def toggle_bypass(self) -> None:
         self.bypass_var.set(not self.bypass_var.get())
@@ -588,8 +679,10 @@ class LocalVoiceApp:
         self.engine.set_bypass(self.bypass_var.get())
 
     def test_my_voice(self) -> None:
-        enabling = not self.monitor_enabled_var.get()
-        if enabling and not self.settings["monitor_warning_seen"]:
+        if self.auditioning:
+            self.stop_preview()
+            return
+        if not self.settings["monitor_warning_seen"]:
             if not messagebox.askokcancel(
                 "Use headphones",
                 "Wear headphones before monitoring your voice. Speakers can create loud feedback. Continue?",
@@ -597,31 +690,85 @@ class LocalVoiceApp:
             ):
                 return
             self.settings["monitor_warning_seen"] = True
-        self.monitor_enabled_var.set(enabling)
-        self.settings["monitor_enabled"] = enabling
         if not self.engine.running:
+            self.start_preview()
+            return
+        enabling = not self.monitor_enabled_var.get()
+        try:
             if enabling:
-                self.start_live()
-        else:
-            try:
-                output_index = self._device_index(self.output_var.get())
-                monitor_index = self._device_index(self.monitor_var.get())
-                if enabling and monitor_index != output_index:
-                    self.engine.enable_monitor(monitor_index)
-                elif not enabling:
-                    self.engine.disable_monitor()
-                self.status_var.set(
-                    "Headphone monitoring is on."
-                    if enabling
-                    else "Headphone monitoring is off."
+                self.engine.enable_monitor(
+                    self._device_index(
+                        self.monitor_var.get(),
+                        self.monitor_outputs,
+                        "your headphones",
+                    )
                 )
-            except (PortAudioError, RuntimeError, ValueError) as error:
-                self.monitor_enabled_var.set(False)
-                self.settings["monitor_enabled"] = False
-                messagebox.showerror("Monitoring failed", str(error), parent=self.root)
-        self.monitor_button.configure(
-            text="STOP HEARING" if self.monitor_enabled_var.get() else "HEAR MY VOICE"
-        )
+            else:
+                self.engine.disable_monitor()
+            self.monitor_enabled_var.set(enabling)
+            self.settings["monitor_enabled"] = enabling
+            self.status_var.set(
+                "You can hear the changed voice; transmission mute is unchanged."
+                if enabling
+                else "Headphone monitoring is off."
+            )
+            self.monitor_button.configure(
+                text="STOP HEADPHONE MONITOR" if enabling else "TEST IN HEADPHONES"
+            )
+        except (PortAudioError, RuntimeError, ValueError) as error:
+            self.monitor_enabled_var.set(False)
+            self.settings["monitor_enabled"] = False
+            messagebox.showerror("Headphone test failed", str(error), parent=self.root)
+        self._save_settings()
+
+    def start_preview(self) -> None:
+        try:
+            input_index = self._device_index(
+                self.input_var.get(), self.input_choices, "the microphone you use"
+            )
+            monitor_index = self._device_index(
+                self.monitor_var.get(), self.monitor_outputs, "your headphones"
+            )
+            if self.virtual_outputs:
+                output_index = self._device_index(
+                    self.output_var.get(), self.virtual_outputs, "a virtual microphone"
+                )
+                rate = self.engine.start(
+                    input_index,
+                    output_index,
+                    self.current_character(),
+                    monitor_index,
+                    muted=True,
+                    bypass=self.bypass_var.get(),
+                )
+            else:
+                rate = self.engine.start(
+                    input_index,
+                    monitor_index,
+                    self.current_character(),
+                    muted=False,
+                    bypass=self.bypass_var.get(),
+                )
+            self.auditioning = True
+            self.monitor_enabled_var.set(True)
+            self.monitor_button.configure(text="STOP TEST")
+            self.status_var.set(
+                f"HEADPHONE TEST at {rate:,} Hz — speak normally. "
+                "Nothing is being sent to other apps."
+            )
+        except (PortAudioError, RuntimeError, ValueError) as error:
+            self.engine.stop()
+            self.auditioning = False
+            self.monitor_enabled_var.set(False)
+            messagebox.showerror("Headphone test failed", str(error), parent=self.root)
+
+    def stop_preview(self) -> None:
+        self.engine.stop()
+        self.auditioning = False
+        self.monitor_enabled_var.set(False)
+        self.settings["monitor_enabled"] = False
+        self.monitor_button.configure(text="TEST IN HEADPHONES")
+        self.status_var.set("Headphone test stopped.")
         self._save_settings()
 
     def configure_settings(self) -> None:
@@ -797,32 +944,27 @@ class LocalVoiceApp:
     def show_cable_help(self) -> None:
         open_page = messagebox.askyesno(
             "Virtual microphone setup",
-            "LocalVoice sends processed audio to the output you select. Install a virtual audio cable, select its playback/input side here, then select its recording/output side as the microphone in Discord, OBS, a game, or a browser.\n\n"
-            "If no cable appears in the device list, install one and press Refresh.\n\nOpen the signed, open-source Virtual Audio Driver download page now?",
+            "To send your changed voice to other apps:\n\n"
+            "1. Download VB-CABLE from its official site.\n"
+            "2. Extract the ZIP and run VBCABLE_Setup_x64.exe as administrator.\n"
+            "3. Restart Windows, launch LocalVoice, and click Refresh.\n"
+            "4. LocalVoice uses CABLE Input. Select CABLE Output as the microphone in Discord, games, OBS, or your browser.\n\n"
+            "You can test through headphones before installing it.\n\n"
+            "Open the official VB-CABLE download page now?",
             parent=self.root,
         )
         if open_page:
-            webbrowser.open(
-                "https://github.com/VirtualDrivers/Virtual-Audio-Driver/releases/latest"
-            )
+            webbrowser.open("https://vb-audio.com/Cable/")
 
     def first_run_help(self) -> None:
         if self.settings["onboarding_complete"]:
             return
-        has_virtual = any(self._is_virtual(device) for device in self.outputs)
-        messagebox.showinfo(
-            "Welcome to LocalVoice",
-            "Three quick steps:\n\n"
-            "1. Pick the microphone you speak into.\n"
-            "2. Pick a virtual microphone output for Discord, games, and calls.\n"
-            "3. Pick your headphones and click HEAR MY VOICE to test.\n\n"
-            f"Push to talk defaults to {self.settings['ptt_key'].upper()}. Change it under Hotkey settings.",
-            parent=self.root,
+        self.status_var.set(
+            "Start with TEST IN HEADPHONES. Set up the virtual mic only when you "
+            "are ready to use LocalVoice in another app."
         )
         self.settings["onboarding_complete"] = True
         self._save_settings()
-        if not has_virtual:
-            self.show_cable_help()
 
     def show_window(self) -> None:
         self.root.deiconify()
@@ -870,12 +1012,17 @@ def main() -> None:
             None, False, "LocalVoice.SingleInstance"
         )
         if ctypes.windll.kernel32.GetLastError() == 183:
-            ctypes.windll.user32.MessageBoxW(
-                None,
-                "LocalVoice is already running in the system tray.",
-                "LocalVoice",
-                0x40,
-            )
+            window = ctypes.windll.user32.FindWindowW(None, "LocalVoice")
+            if window:
+                ctypes.windll.user32.ShowWindow(window, 9)
+                ctypes.windll.user32.SetForegroundWindow(window)
+            else:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "LocalVoice is already running. Use its system-tray icon to open it.",
+                    "LocalVoice",
+                    0x40,
+                )
             return
     root = tk.Tk()
     LocalVoiceApp(root)
