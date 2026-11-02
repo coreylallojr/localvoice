@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localvoice"
+version = "0.1.0"
+description = "A fully local, system-wide voice changer for Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+authors = [{ name = "Corey" }]
+dependencies = [
+  "numpy>=2.0",
+  "pedalboard>=0.9.26",
+  "pynput>=1.8",
+  "sounddevice>=0.5.2",
+]
+
+[project.scripts]
+localvoice = "localvoice.app:main"
+
+[tool.setuptools.packages.find]
+include = ["localvoice*"]
+

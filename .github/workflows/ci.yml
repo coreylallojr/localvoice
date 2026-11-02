@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e .
+      - run: python -m unittest discover -v
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e . pyinstaller
+      - run: pyinstaller --noconfirm --clean --windowed --name LocalVoice --collect-all pedalboard --collect-all sounddevice localvoice/__main__.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalVoice-windows-x64
+          path: dist/LocalVoice
+
