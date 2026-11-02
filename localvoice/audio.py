@@ -102,6 +102,9 @@ def build_board(character: Character) -> Pedalboard:
 class AudioEngine:
     def __init__(self) -> None:
         self.stream: sd.Stream | None = None
+        self.monitor_stream: sd.OutputStream | None = None
+        self.monitor_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=8)
+        self.monitor_channels = 2
         self.commands: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
         self.board = build_board(Character("clean", "Clean"))
         self.bypass = False
@@ -116,9 +119,17 @@ class AudioEngine:
     def running(self) -> bool:
         return bool(self.stream and self.stream.active)
 
-    def start(self, input_device: int, output_device: int, character: Character) -> int:
+    def start(
+        self,
+        input_device: int,
+        output_device: int,
+        character: Character,
+        monitor_device: int | None = None,
+    ) -> int:
         self.stop()
-        sample_rate = self._choose_sample_rate(input_device, output_device)
+        sample_rate = self._choose_sample_rate(
+            input_device, output_device, monitor_device
+        )
         self.board = build_board(character)
         self.error = ""
         self.xruns = 0
@@ -133,10 +144,14 @@ class AudioEngine:
             callback=self._callback,
         )
         self.stream.start()
+        if monitor_device is not None:
+            self.enable_monitor(monitor_device)
         return sample_rate
 
     @staticmethod
-    def _choose_sample_rate(input_device: int, output_device: int) -> int:
+    def _choose_sample_rate(
+        input_device: int, output_device: int, monitor_device: int | None = None
+    ) -> int:
         errors = []
         for rate in (48_000, 44_100):
             try:
@@ -146,6 +161,16 @@ class AudioEngine:
                 sd.check_output_settings(
                     output_device, channels=1, dtype="float32", samplerate=rate
                 )
+                if monitor_device is not None:
+                    monitor_channels = min(
+                        2, int(sd.query_devices(monitor_device)["max_output_channels"])
+                    )
+                    sd.check_output_settings(
+                        monitor_device,
+                        channels=monitor_channels,
+                        dtype="float32",
+                        samplerate=rate,
+                    )
                 return rate
             except sd.PortAudioError as error:
                 errors.append(str(error))
@@ -155,11 +180,58 @@ class AudioEngine:
         )
 
     def stop(self) -> None:
+        self.disable_monitor()
         if self.stream:
             self.stream.stop()
             self.stream.close()
             self.stream = None
         self.input_level = self.output_level = 0.0
+
+    def enable_monitor(self, device: int) -> None:
+        self.disable_monitor()
+        if not self.running:
+            return
+        self.monitor_channels = min(
+            2, int(sd.query_devices(device)["max_output_channels"])
+        )
+        sd.check_output_settings(
+            device,
+            channels=self.monitor_channels,
+            dtype="float32",
+            samplerate=self.sample_rate,
+        )
+        self.monitor_stream = sd.OutputStream(
+            device=device,
+            samplerate=self.sample_rate,
+            blocksize=512,
+            dtype="float32",
+            channels=self.monitor_channels,
+            latency="low",
+            callback=self._monitor_callback,
+        )
+        self.monitor_stream.start()
+
+    def disable_monitor(self) -> None:
+        if self.monitor_stream:
+            self.monitor_stream.stop()
+            self.monitor_stream.close()
+            self.monitor_stream = None
+        while True:
+            try:
+                self.monitor_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _monitor_callback(self, outdata, frames, _time_info, status) -> None:
+        outdata.fill(0)
+        if status:
+            self.xruns += 1
+        try:
+            block = self.monitor_queue.get_nowait()
+        except queue.Empty:
+            return
+        count = min(frames, len(block))
+        outdata[:count, :] = block[:count, np.newaxis]
 
     def set_character(self, character: Character) -> None:
         self.commands.put(("character", character))
@@ -203,6 +275,15 @@ class AudioEngine:
             np.clip(output, -1, 1, out=output)
             outdata[:, 0] = output
             self.output_level = float(np.max(np.abs(output), initial=0))
+            if self.monitor_stream and self.monitor_stream.active:
+                try:
+                    self.monitor_queue.put_nowait(output.copy())
+                except queue.Full:
+                    try:
+                        self.monitor_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.monitor_queue.put_nowait(output.copy())
         except Exception as error:  # noqa: BLE001 - fail silent so the raw voice never leaks.
             outdata.fill(0)
             self.error = str(error)

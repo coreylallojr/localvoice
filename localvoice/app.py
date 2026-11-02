@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import tkinter as tk
@@ -9,11 +10,24 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import sounddevice as sd
 from sounddevice import PortAudioError
 
 from .audio import AudioDevice, AudioEngine, list_devices
 from .characters import Character, CharacterStore, export_voicepack, import_voicepack
-from .hotkeys import Hotkeys
+from .hotkeys import Hotkeys, normalize_ptt_key
+from .tray import Tray
+
+DEFAULT_SETTINGS = {
+    "ptt_enabled": True,
+    "ptt_key": "f8",
+    "ptt_mode": "hold",
+    "close_to_tray": True,
+    "auto_live": False,
+    "monitor_enabled": False,
+    "onboarding_complete": False,
+    "monitor_warning_seen": False,
+}
 
 
 class CharacterEditor(tk.Toplevel):
@@ -100,49 +114,140 @@ class CharacterEditor(tk.Toplevel):
             messagebox.showerror("Invalid character", str(error), parent=self)
 
 
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk, settings: dict):
+        super().__init__(parent)
+        self.title("LocalVoice settings")
+        self.geometry("480x390")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result: dict | None = None
+        self.ptt_enabled = tk.BooleanVar(value=settings["ptt_enabled"])
+        self.ptt_key = tk.StringVar(value=settings["ptt_key"])
+        self.ptt_mode = tk.StringVar(value=settings["ptt_mode"])
+        self.close_to_tray = tk.BooleanVar(value=settings["close_to_tray"])
+        self.auto_live = tk.BooleanVar(value=settings["auto_live"])
+
+        frame = ttk.Frame(self, padding=20)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=1)
+        ttk.Label(frame, text="PUSH TO TALK", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
+        )
+        ttk.Checkbutton(
+            frame, text="Enable push to talk", variable=self.ptt_enabled
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Label(frame, text="Key").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.ptt_key, width=18).grid(
+            row=2, column=1, sticky="w", padx=12
+        )
+        ttk.Label(
+            frame, text="Examples: F8, Caps Lock, Space, V", foreground="#555"
+        ).grid(row=3, column=1, sticky="w", padx=12)
+        ttk.Label(frame, text="Behavior").grid(row=4, column=0, sticky="w", pady=10)
+        ttk.Combobox(
+            frame,
+            textvariable=self.ptt_mode,
+            values=("hold", "toggle"),
+            state="readonly",
+            width=15,
+        ).grid(row=4, column=1, sticky="w", padx=12)
+        ttk.Label(
+            frame,
+            text="Hold: live only while pressed. Toggle: each press mutes/unmutes.",
+            foreground="#555",
+            wraplength=330,
+        ).grid(row=5, column=1, sticky="w", padx=12)
+
+        ttk.Separator(frame).grid(row=6, column=0, columnspan=2, sticky="ew", pady=18)
+        ttk.Checkbutton(
+            frame,
+            text="Keep running in the system tray when closed",
+            variable=self.close_to_tray,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Checkbutton(
+            frame,
+            text="Go live automatically when LocalVoice starts",
+            variable=self.auto_live,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=5)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(24, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(
+            side="left", padx=6
+        )
+        ttk.Button(buttons, text="Save", command=self.save).pack(side="left")
+        self.bind("<Escape>", lambda _event: self.destroy())
+
+    def save(self) -> None:
+        try:
+            key = normalize_ptt_key(self.ptt_key.get())
+        except ValueError as error:
+            messagebox.showerror("Invalid push-to-talk key", str(error), parent=self)
+            return
+        self.result = {
+            "ptt_enabled": self.ptt_enabled.get(),
+            "ptt_key": key,
+            "ptt_mode": self.ptt_mode.get(),
+            "close_to_tray": self.close_to_tray.get(),
+            "auto_live": self.auto_live.get(),
+        }
+        self.destroy()
+
+
 class LocalVoiceApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("LocalVoice")
-        self.root.geometry("760x560")
-        self.root.minsize(680, 500)
+        self.root.geometry("820x700")
+        self.root.minsize(720, 620)
         self.store = CharacterStore()
         self.settings_path = self.store.root / "settings.json"
-        self.settings = self._load_settings()
+        self.settings = DEFAULT_SETTINGS | self._load_settings()
         self.characters = self.store.load()
         self.engine = AudioEngine()
         self.inputs: list[AudioDevice] = []
         self.outputs: list[AudioDevice] = []
+        self.tray: Tray | None = None
+        self.hotkeys: Hotkeys | None = None
+        self.quitting = False
 
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
+        self.monitor_var = tk.StringVar()
         self.character_var = tk.StringVar(value=self.characters[0].name)
         self.status_var = tk.StringVar(
-            value="Ready. Select an output cable, then go live."
+            value="Ready. Choose your microphone, virtual cable, and headphones."
         )
         self.live_var = tk.BooleanVar()
         self.bypass_var = tk.BooleanVar()
         self.mute_var = tk.BooleanVar()
+        self.ptt_enabled_var = tk.BooleanVar(value=self.settings["ptt_enabled"])
+        self.monitor_enabled_var = tk.BooleanVar(value=self.settings["monitor_enabled"])
+        self.ptt_status_var = tk.StringVar()
 
         self._build_ui()
         self.refresh_devices()
         self._restore_selections()
-        self.hotkeys = Hotkeys(
+        self.start_hotkeys()
+        self.tray = Tray(
             lambda action: self.root.after(0, action),
-            {
-                "<ctrl>+<shift>+<space>": self.toggle_live,
-                "<ctrl>+<shift>+m": self.toggle_mute,
-                "<ctrl>+<shift>+b": self.toggle_bypass,
-                "<ctrl>+<shift>+<left>": lambda: self.step_character(-1),
-                "<ctrl>+<shift>+<right>": lambda: self.step_character(1),
-            },
+            show=self.show_window,
+            toggle_live=self.toggle_live,
+            toggle_mute=self.toggle_mute,
+            quit_app=self.quit_app,
         )
         try:
-            self.hotkeys.start()
+            self.tray.start()
         except RuntimeError as error:
-            self.status_var.set(f"Hotkeys unavailable: {error}")
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+            self.tray = None
+            self.status_var.set(f"Tray unavailable: {error}")
+        self.root.protocol("WM_DELETE_WINDOW", self.window_close)
         self.root.after(80, self.update_meters)
+        self.root.after(300, self.first_run_help)
+        if self.settings["auto_live"]:
+            self.root.after(700, self.start_live)
 
     def _build_ui(self) -> None:
         style = ttk.Style()
@@ -155,11 +260,13 @@ class LocalVoiceApp:
         ttk.Label(frame, text="LOCALVOICE", font=("Segoe UI", 20, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w"
         )
-        ttk.Label(frame, text="Local microphone processing for every Windows app").grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(0, 18)
-        )
+        ttk.Label(
+            frame, text="Your voice, processed locally, in every Windows app"
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 18))
 
-        ttk.Label(frame, text="Microphone").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="1. Your microphone").grid(
+            row=2, column=0, sticky="w", pady=5
+        )
         self.input_box = ttk.Combobox(
             frame, textvariable=self.input_var, state="readonly"
         )
@@ -168,7 +275,7 @@ class LocalVoiceApp:
             row=2, column=2
         )
 
-        ttk.Label(frame, text="Output / cable").grid(
+        ttk.Label(frame, text="2. Virtual microphone").grid(
             row=3, column=0, sticky="w", pady=5
         )
         self.output_box = ttk.Combobox(
@@ -179,23 +286,35 @@ class LocalVoiceApp:
             row=3, column=2
         )
 
-        ttk.Separator(frame).grid(row=4, column=0, columnspan=3, sticky="ew", pady=16)
+        ttk.Label(frame, text="3. Your headphones").grid(
+            row=4, column=0, sticky="w", pady=5
+        )
+        self.monitor_box = ttk.Combobox(
+            frame, textvariable=self.monitor_var, state="readonly"
+        )
+        self.monitor_box.grid(row=4, column=1, sticky="ew", padx=8)
+        self.monitor_button = ttk.Button(
+            frame, text="HEAR MY VOICE", command=self.test_my_voice
+        )
+        self.monitor_button.grid(row=4, column=2)
 
-        ttk.Label(frame, text="Character").grid(row=5, column=0, sticky="w")
+        ttk.Separator(frame).grid(row=5, column=0, columnspan=3, sticky="ew", pady=16)
+
+        ttk.Label(frame, text="Character").grid(row=6, column=0, sticky="w")
         self.character_box = ttk.Combobox(
             frame,
             textvariable=self.character_var,
             values=[item.name for item in self.characters],
             state="readonly",
         )
-        self.character_box.grid(row=5, column=1, sticky="ew", padx=8)
+        self.character_box.grid(row=6, column=1, sticky="ew", padx=8)
         self.character_box.bind(
             "<<ComboboxSelected>>", lambda _event: self.select_character()
         )
-        ttk.Button(frame, text="New", command=self.new_character).grid(row=5, column=2)
+        ttk.Button(frame, text="New", command=self.new_character).grid(row=6, column=2)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=1, sticky="w", padx=8, pady=8)
+        buttons.grid(row=7, column=1, sticky="w", padx=8, pady=8)
         ttk.Button(buttons, text="Edit", command=self.edit_character).pack(
             side="left", padx=(0, 6)
         )
@@ -210,11 +329,17 @@ class LocalVoiceApp:
         )
 
         live = ttk.Button(frame, text="GO LIVE", command=self.toggle_live)
-        live.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(14, 10), ipady=10)
+        live.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(14, 10), ipady=10)
         self.live_button = live
 
         toggles = ttk.Frame(frame)
-        toggles.grid(row=8, column=0, columnspan=3)
+        toggles.grid(row=9, column=0, columnspan=3)
+        ttk.Checkbutton(
+            toggles,
+            text="Push to talk",
+            variable=self.ptt_enabled_var,
+            command=self.toggle_ptt_enabled,
+        ).pack(side="left", padx=12)
         ttk.Checkbutton(
             toggles,
             text="Bypass effects",
@@ -224,55 +349,97 @@ class LocalVoiceApp:
         ttk.Checkbutton(
             toggles, text="Mute output", variable=self.mute_var, command=self.apply_mute
         ).pack(side="left", padx=12)
+        ttk.Button(
+            toggles, text="Hotkey settings", command=self.configure_settings
+        ).pack(side="left", padx=12)
 
-        ttk.Label(frame, text="Input").grid(row=9, column=0, sticky="e", pady=(18, 3))
+        ttk.Label(frame, text="Input").grid(row=10, column=0, sticky="e", pady=(18, 3))
         self.input_meter = ttk.Progressbar(frame, maximum=1)
         self.input_meter.grid(
-            row=9, column=1, columnspan=2, sticky="ew", padx=8, pady=(18, 3)
+            row=10, column=1, columnspan=2, sticky="ew", padx=8, pady=(18, 3)
         )
-        ttk.Label(frame, text="Output").grid(row=10, column=0, sticky="e", pady=3)
+        ttk.Label(frame, text="Output").grid(row=11, column=0, sticky="e", pady=3)
         self.output_meter = ttk.Progressbar(frame, maximum=1)
         self.output_meter.grid(
-            row=10, column=1, columnspan=2, sticky="ew", padx=8, pady=3
+            row=11, column=1, columnspan=2, sticky="ew", padx=8, pady=3
         )
 
-        ttk.Separator(frame).grid(row=11, column=0, columnspan=3, sticky="ew", pady=16)
+        ttk.Separator(frame).grid(row=12, column=0, columnspan=3, sticky="ew", pady=16)
         ttk.Label(frame, textvariable=self.status_var, wraplength=680).grid(
-            row=12, column=0, columnspan=3, sticky="w"
+            row=13, column=0, columnspan=3, sticky="w"
+        )
+        ttk.Label(frame, textvariable=self.ptt_status_var, foreground="#087f5b").grid(
+            row=14, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
         ttk.Label(
             frame,
-            text="Hotkeys: Ctrl+Shift+Space live · Ctrl+Shift+M mute · Ctrl+Shift+B bypass · Ctrl+Shift+←/→ character",
+            text="Other hotkeys: Ctrl+Shift+Space live | Ctrl+Shift+M mute | Ctrl+Shift+B bypass | Ctrl+Shift+Left/Right character",
             foreground="#555",
-        ).grid(row=13, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ).grid(row=15, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        management = ttk.Frame(frame)
+        management.grid(row=16, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        ttk.Button(management, text="Hide to tray", command=self.hide_window).pack(
+            side="left", padx=5
+        )
+        ttk.Button(management, text="Settings", command=self.configure_settings).pack(
+            side="left", padx=5
+        )
+        ttk.Button(management, text="Quit", command=self.quit_app).pack(
+            side="left", padx=5
+        )
+        self.update_ptt_status()
 
     def refresh_devices(self) -> None:
         try:
             self.inputs, self.outputs = list_devices()
             self.input_box["values"] = [item.label for item in self.inputs]
             self.output_box["values"] = [item.label for item in self.outputs]
+            self.monitor_box["values"] = [item.label for item in self.outputs]
+            default_input, default_output = sd.default.device
             if not self.input_var.get() and self.inputs:
-                self.input_var.set(self.inputs[0].label)
+                selected = next(
+                    (item for item in self.inputs if item.index == default_input),
+                    self.inputs[0],
+                )
+                self.input_var.set(selected.label)
             if not self.output_var.get() and self.outputs:
                 virtual = next(
+                    (item for item in self.outputs if self._is_virtual(item)),
+                    next(
+                        (item for item in self.outputs if item.index == default_output),
+                        self.outputs[0],
+                    ),
+                )
+                self.output_var.set(virtual.label)
+            if not self.monitor_var.get() and self.outputs:
+                monitor = next(
                     (
                         item
                         for item in self.outputs
-                        if any(
-                            term in item.name.casefold()
-                            for term in ("virtual audio", "cable input", "vb-audio")
-                        )
+                        if item.index == default_output and not self._is_virtual(item)
                     ),
-                    self.outputs[0],
+                    next(
+                        (item for item in self.outputs if not self._is_virtual(item)),
+                        self.outputs[0],
+                    ),
                 )
-                self.output_var.set(virtual.label)
+                self.monitor_var.set(monitor.label)
         except PortAudioError as error:
             self.status_var.set(f"Could not enumerate audio devices: {error}")
+
+    @staticmethod
+    def _is_virtual(device: AudioDevice) -> bool:
+        return any(
+            term in device.name.casefold()
+            for term in ("virtual audio", "cable input", "vb-audio")
+        )
 
     def _restore_selections(self) -> None:
         for variable, key, devices in (
             (self.input_var, "input", self.inputs),
             (self.output_var, "output", self.outputs),
+            (self.monitor_var, "monitor", self.outputs),
         ):
             wanted = self.settings.get(key)
             match = next((item.label for item in devices if item.label == wanted), None)
@@ -281,6 +448,7 @@ class LocalVoiceApp:
         name = self.settings.get("character")
         if any(item.name == name for item in self.characters):
             self.character_var.set(name)
+        self.update_ptt_status()
 
     def current_character(self) -> Character:
         return next(
@@ -291,30 +459,119 @@ class LocalVoiceApp:
     def _device_index(label: str) -> int:
         return int(label.split(":", 1)[0])
 
+    def start_hotkeys(self) -> None:
+        if self.hotkeys:
+            self.hotkeys.stop()
+        self.hotkeys = Hotkeys(
+            lambda action: self.root.after(0, action),
+            {
+                "<ctrl>+<shift>+<space>": self.toggle_live,
+                "<ctrl>+<shift>+m": self.toggle_mute,
+                "<ctrl>+<shift>+b": self.toggle_bypass,
+                "<ctrl>+<shift>+<left>": lambda: self.step_character(-1),
+                "<ctrl>+<shift>+<right>": lambda: self.step_character(1),
+            },
+            ptt_key=self.settings["ptt_key"],
+            ptt_press=self.ptt_press,
+            ptt_release=self.ptt_release,
+        )
+        try:
+            self.hotkeys.start()
+        except RuntimeError as error:
+            self.status_var.set(f"Hotkeys unavailable: {error}")
+
+    def update_ptt_status(self) -> None:
+        if self.ptt_enabled_var.get():
+            mode = "hold" if self.settings["ptt_mode"] == "hold" else "press to toggle"
+            self.ptt_status_var.set(
+                f"Push to talk: {self.settings['ptt_key'].upper()} ({mode})"
+            )
+        else:
+            self.ptt_status_var.set("Push to talk: off")
+
+    def toggle_ptt_enabled(self) -> None:
+        self.settings["ptt_enabled"] = self.ptt_enabled_var.get()
+        if self.ptt_enabled_var.get():
+            self.mute_var.set(True)
+        else:
+            self.mute_var.set(False)
+        self.apply_mute()
+        self.update_ptt_status()
+        self._save_settings()
+
+    def ptt_press(self) -> None:
+        if not self.ptt_enabled_var.get():
+            return
+        if not self.engine.running and not self.start_live():
+            return
+        if self.settings["ptt_mode"] == "toggle":
+            self.toggle_mute()
+        else:
+            self.mute_var.set(False)
+            self.apply_mute()
+            self.status_var.set("TRANSMITTING - release the push-to-talk key to mute.")
+
+    def ptt_release(self) -> None:
+        if self.ptt_enabled_var.get() and self.settings["ptt_mode"] == "hold":
+            self.mute_var.set(True)
+            self.apply_mute()
+            self.status_var.set("Push to talk ready - output muted.")
+
     def toggle_live(self) -> None:
         if self.engine.running:
-            self.engine.stop()
-            self.live_var.set(False)
-            self.live_button.configure(text="GO LIVE")
-            self.status_var.set("Stopped.")
-            return
+            self.stop_live()
+        else:
+            self.start_live()
+
+    def start_live(self) -> bool:
         try:
+            output_index = self._device_index(self.output_var.get())
+            monitor_index = (
+                self._device_index(self.monitor_var.get())
+                if self.monitor_var.get()
+                else None
+            )
+            use_monitor = (
+                self.monitor_enabled_var.get() and monitor_index != output_index
+            )
             rate = self.engine.start(
                 self._device_index(self.input_var.get()),
-                self._device_index(self.output_var.get()),
+                output_index,
                 self.current_character(),
+                monitor_index if use_monitor else None,
             )
             self.engine.set_bypass(self.bypass_var.get())
+            if self.ptt_enabled_var.get():
+                self.mute_var.set(True)
             self.engine.set_muted(self.mute_var.get())
             self.live_var.set(True)
             self.live_button.configure(text="STOP")
+            self.monitor_button.configure(
+                text="STOP HEARING"
+                if self.monitor_enabled_var.get()
+                else "HEAR MY VOICE"
+            )
             self.status_var.set(
-                f"LIVE at {rate:,} Hz. Select the cable's recording endpoint as the microphone in your app."
+                f"LIVE at {rate:,} Hz. "
+                + (
+                    "Hold your push-to-talk key to transmit."
+                    if self.ptt_enabled_var.get()
+                    else "Your changed voice is transmitting."
+                )
             )
             self._save_settings()
+            return True
         except (PortAudioError, RuntimeError, ValueError) as error:
             self.status_var.set(f"Could not start audio: {error}")
             messagebox.showerror("LocalVoice", str(error), parent=self.root)
+            return False
+
+    def stop_live(self) -> None:
+        self.engine.stop()
+        self.live_var.set(False)
+        self.live_button.configure(text="GO LIVE")
+        self.monitor_button.configure(text="HEAR MY VOICE")
+        self.status_var.set("Stopped.")
 
     def toggle_mute(self) -> None:
         self.mute_var.set(not self.mute_var.get())
@@ -329,6 +586,60 @@ class LocalVoiceApp:
 
     def apply_bypass(self) -> None:
         self.engine.set_bypass(self.bypass_var.get())
+
+    def test_my_voice(self) -> None:
+        enabling = not self.monitor_enabled_var.get()
+        if enabling and not self.settings["monitor_warning_seen"]:
+            if not messagebox.askokcancel(
+                "Use headphones",
+                "Wear headphones before monitoring your voice. Speakers can create loud feedback. Continue?",
+                parent=self.root,
+            ):
+                return
+            self.settings["monitor_warning_seen"] = True
+        self.monitor_enabled_var.set(enabling)
+        self.settings["monitor_enabled"] = enabling
+        if not self.engine.running:
+            if enabling:
+                self.start_live()
+        else:
+            try:
+                output_index = self._device_index(self.output_var.get())
+                monitor_index = self._device_index(self.monitor_var.get())
+                if enabling and monitor_index != output_index:
+                    self.engine.enable_monitor(monitor_index)
+                elif not enabling:
+                    self.engine.disable_monitor()
+                self.status_var.set(
+                    "Headphone monitoring is on."
+                    if enabling
+                    else "Headphone monitoring is off."
+                )
+            except (PortAudioError, RuntimeError, ValueError) as error:
+                self.monitor_enabled_var.set(False)
+                self.settings["monitor_enabled"] = False
+                messagebox.showerror("Monitoring failed", str(error), parent=self.root)
+        self.monitor_button.configure(
+            text="STOP HEARING" if self.monitor_enabled_var.get() else "HEAR MY VOICE"
+        )
+        self._save_settings()
+
+    def configure_settings(self) -> None:
+        dialog = SettingsDialog(self.root, self.settings)
+        self.root.wait_window(dialog)
+        if not dialog.result:
+            return
+        self.settings.update(dialog.result)
+        self.ptt_enabled_var.set(self.settings["ptt_enabled"])
+        self.update_ptt_status()
+        self.start_hotkeys()
+        if self.ptt_enabled_var.get():
+            self.mute_var.set(True)
+        else:
+            self.mute_var.set(False)
+        self.apply_mute()
+        self._save_settings()
+        self.status_var.set("Settings saved.")
 
     def select_character(self) -> None:
         self.engine.set_character(self.current_character())
@@ -469,13 +780,18 @@ class LocalVoiceApp:
             return {}
 
     def _save_settings(self) -> None:
-        settings = {
-            "input": self.input_var.get(),
-            "output": self.output_var.get(),
-            "character": self.character_var.get(),
-        }
+        self.settings.update(
+            {
+                "input": self.input_var.get(),
+                "output": self.output_var.get(),
+                "monitor": self.monitor_var.get(),
+                "character": self.character_var.get(),
+                "monitor_enabled": self.monitor_enabled_var.get(),
+                "ptt_enabled": self.ptt_enabled_var.get(),
+            }
+        )
         temporary = self.settings_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
         temporary.replace(self.settings_path)
 
     def show_cable_help(self) -> None:
@@ -490,6 +806,40 @@ class LocalVoiceApp:
                 "https://github.com/VirtualDrivers/Virtual-Audio-Driver/releases/latest"
             )
 
+    def first_run_help(self) -> None:
+        if self.settings["onboarding_complete"]:
+            return
+        has_virtual = any(self._is_virtual(device) for device in self.outputs)
+        messagebox.showinfo(
+            "Welcome to LocalVoice",
+            "Three quick steps:\n\n"
+            "1. Pick the microphone you speak into.\n"
+            "2. Pick a virtual microphone output for Discord, games, and calls.\n"
+            "3. Pick your headphones and click HEAR MY VOICE to test.\n\n"
+            f"Push to talk defaults to {self.settings['ptt_key'].upper()}. Change it under Hotkey settings.",
+            parent=self.root,
+        )
+        self.settings["onboarding_complete"] = True
+        self._save_settings()
+        if not has_virtual:
+            self.show_cable_help()
+
+    def show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide_window(self) -> None:
+        self.root.withdraw()
+        if self.tray:
+            self.tray.notify_hidden()
+
+    def window_close(self) -> None:
+        if self.settings["close_to_tray"] and self.tray:
+            self.hide_window()
+        else:
+            self.quit_app()
+
     def update_meters(self) -> None:
         self.input_meter["value"] = min(1, self.engine.input_level * 2)
         self.output_meter["value"] = min(1, self.engine.output_level * 2)
@@ -497,20 +847,41 @@ class LocalVoiceApp:
             self.status_var.set(f"Audio error (output muted): {self.engine.error}")
         elif self.engine.running and self.engine.xruns:
             self.status_var.set(
-                f"LIVE at {self.engine.sample_rate:,} Hz · {self.engine.xruns} audio warning(s)"
+                f"LIVE at {self.engine.sample_rate:,} Hz | {self.engine.xruns} audio warning(s)"
             )
         self.root.after(80, self.update_meters)
 
-    def close(self) -> None:
+    def quit_app(self) -> None:
+        if self.quitting:
+            return
+        self.quitting = True
         self.engine.stop()
-        self.hotkeys.stop()
+        if self.hotkeys:
+            self.hotkeys.stop()
+        if self.tray:
+            self.tray.stop()
         self.root.destroy()
 
 
 def main() -> None:
+    mutex = None
+    if os.name == "nt":
+        mutex = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "LocalVoice.SingleInstance"
+        )
+        if ctypes.windll.kernel32.GetLastError() == 183:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "LocalVoice is already running in the system tray.",
+                "LocalVoice",
+                0x40,
+            )
+            return
     root = tk.Tk()
     LocalVoiceApp(root)
     root.mainloop()
+    if mutex:
+        ctypes.windll.kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":

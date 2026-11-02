@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "localvoice"
-version = "0.1.1"
+version = "0.2.0"
 description = "A fully local, system-wide voice changer for Windows"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,9 @@ authors = [{ name = "Corey" }]
 dependencies = [
   "numpy>=2.0",
   "pedalboard>=0.9.26",
+  "pillow>=11.0",
   "pynput>=1.8",
+  "pystray>=0.19.5",
   "sounddevice>=0.5.2",
 ]
 
