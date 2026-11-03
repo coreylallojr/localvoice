@@ -11,20 +11,20 @@ mod voices;
 
 use app::Controller;
 use eframe::egui;
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::core::{w, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND};
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZATION_SYNCHRONIZE,
+    CreateMutexW, OpenMutexW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetWindowThreadProcessId, MessageBoxW, SetForegroundWindow, ShowWindow, MB_ICONWARNING, MB_OK,
-    SW_RESTORE, SW_SHOW,
+    FindWindowExW, GetWindowThreadProcessId, MB_ICONWARNING, MB_OK, MessageBoxW, SW_RESTORE,
+    SW_SHOW, SetForegroundWindow, ShowWindow,
 };
+use windows::core::{PWSTR, w};
 
 const TITLE: &str = "LocalVoice";
 
@@ -105,12 +105,17 @@ fn icon_rgba(size: u32) -> Vec<u8> {
     pixels
 }
 
-fn build_tray(actions: Sender<TrayAction>, controller: Arc<Controller>, ctx: egui::Context) -> Option<TrayIcon> {
+fn build_tray(
+    actions: Sender<TrayAction>,
+    controller: Arc<Controller>,
+    ctx: egui::Context,
+) -> Option<TrayIcon> {
     let open = MenuItem::with_id("open", "Open LocalVoice", true, None);
     let live = MenuItem::with_id("live", "Go live / stop", true, None);
     let mute = MenuItem::with_id("mute", "Mute / unmute", true, None);
     let quit = MenuItem::with_id("quit", "Quit", true, None);
-    let menu = Menu::with_items(&[&open, &live, &mute, &PredefinedMenuItem::separator(), &quit]).ok()?;
+    let menu =
+        Menu::with_items(&[&open, &live, &mute, &PredefinedMenuItem::separator(), &quit]).ok()?;
     let icon = tray_icon::Icon::from_rgba(icon_rgba(32), 32, 32).ok()?;
 
     let menu_actions = actions.clone();
@@ -130,8 +135,15 @@ fn build_tray(actions: Sender<TrayAction>, controller: Arc<Controller>, ctx: egu
         menu_ctx.request_repaint();
     }));
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-        if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }
-        | TrayIconEvent::Click { button: MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = event
+        if let TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        }
+        | TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: tray_icon::MouseButtonState::Up,
+            ..
+        } = event
         {
             let _ = actions.send(TrayAction::Show);
             ctx.request_repaint();
@@ -156,10 +168,18 @@ fn existing_window() -> Option<HWND> {
             after = Some(window);
             let mut pid = 0u32;
             GetWindowThreadProcessId(window, Some(&mut pid));
-            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { continue };
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                continue;
+            };
             let mut buffer = [0u16; 512];
             let mut length = buffer.len() as u32;
-            let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length).is_ok();
+            let ok = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+            .is_ok();
             let _ = CloseHandle(process);
             let path = String::from_utf16_lossy(&buffer[..length as usize]).to_lowercase();
             if ok && path.ends_with(r"\localvoice.exe") {
@@ -174,10 +194,18 @@ fn existing_window() -> Option<HWND> {
 fn single_instance() -> bool {
     // SAFETY: plain Win32 calls; the mutex handle intentionally lives until exit.
     unsafe {
-        if OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("LocalVoice.SingleInstance")).is_ok() {
+        if OpenMutexW(
+            SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            w!("LocalVoice.SingleInstance"),
+        )
+        .is_ok()
+        {
             MessageBoxW(
                 None,
-                w!("The old LocalVoice (v0.2) is still running and uses the same hotkeys.\n\nRight-click its tray icon and choose Quit, or it will fight this version for Ctrl+Shift shortcuts."),
+                w!(
+                    "The old LocalVoice (v0.2) is still running and uses the same hotkeys.\n\nRight-click its tray icon and choose Quit, or it will fight this version for Ctrl+Shift shortcuts."
+                ),
                 w!("LocalVoice"),
                 MB_OK | MB_ICONWARNING,
             );
@@ -197,8 +225,14 @@ fn single_instance() -> bool {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--self-check") {
+        std::process::exit(soak::self_check());
+    }
     if let Some(index) = args.iter().position(|a| a == "--soak") {
-        let seconds = args.get(index + 1).and_then(|s| s.parse().ok()).unwrap_or(30);
+        let seconds = args
+            .get(index + 1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
         std::process::exit(soak::run(seconds));
     }
     if !single_instance() {
@@ -209,7 +243,11 @@ fn main() -> eframe::Result {
             .with_title(TITLE)
             .with_inner_size([1020.0, 720.0])
             .with_min_inner_size([860.0, 600.0])
-            .with_icon(egui::IconData { rgba: icon_rgba(64), width: 64, height: 64 }),
+            .with_icon(egui::IconData {
+                rgba: icon_rgba(64),
+                width: 64,
+                height: 64,
+            }),
         persist_window: false,
         ..Default::default()
     };

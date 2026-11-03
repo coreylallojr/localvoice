@@ -15,7 +15,9 @@ fn say(line: &str) {
     use std::io::Write;
     // SAFETY: attaching to the parent console so a GUI-subsystem exe can print.
     unsafe {
-        let _ = windows::Win32::System::Console::AttachConsole(windows::Win32::System::Console::ATTACH_PARENT_PROCESS);
+        let _ = windows::Win32::System::Console::AttachConsole(
+            windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
     }
     println!("{line}");
     let _ = std::io::stdout().flush();
@@ -32,7 +34,9 @@ type Recording = (cpal::Stream, Arc<Mutex<Vec<f32>>>, u32);
 fn record_cable() -> Option<Recording> {
     let host = cpal::default_host();
     let device = host.input_devices().ok()?.find(|d| {
-        d.description().map(|x| x.name().to_lowercase().starts_with("cable output")).unwrap_or(false)
+        d.description()
+            .map(|x| x.name().to_lowercase().starts_with("cable output"))
+            .unwrap_or(false)
     })?;
     let config = device.default_input_config().ok()?;
     let channels = config.channels() as usize;
@@ -68,17 +72,50 @@ fn peak_hz(signal: &[f32], rate: u32) -> f32 {
     bin as f32 * rate as f32 / signal.len() as f32
 }
 
+/// `--self-check`: packaged-exe smoke test that needs no GPU or audio hardware
+/// (used by CI). Loads voices and settings, lists devices, runs every voice.
+pub fn self_check() -> i32 {
+    let voices = crate::voices::Store::new(&crate::voices::data_dir()).load();
+    let lists = crate::devices::list();
+    for voice in &voices {
+        let mut chain = crate::dsp::Chain::new(&voice.params, 48_000);
+        let mut block: Vec<f32> = (0..48_000).map(|i| 0.2 * (i as f32 * 0.03).sin()).collect();
+        for chunk in block.chunks_mut(480) {
+            chain.process(chunk);
+        }
+        if !block.iter().all(|s| s.is_finite()) {
+            say(&format!("FAIL voice {} produced non-finite audio", voice.name));
+            return 1;
+        }
+    }
+    say(&format!(
+        "self-check OK: {} voices, {} inputs, {} virtual mics, {} outputs",
+        voices.len(),
+        lists.inputs.len(),
+        lists.virtual_outputs.len(),
+        lists.monitors.len()
+    ));
+    0
+}
+
 pub fn run(seconds: u64) -> i32 {
     let controller = Controller::new(Arc::new(|| {}));
     let shared = controller.shared.clone();
     let (input, output, monitor, voices) = {
         let session = controller.session();
         let s = &session.settings;
-        (s.input.clone(), s.output.clone(), s.monitor.clone(), session.voices.clone())
+        (
+            s.input.clone(),
+            s.output.clone(),
+            s.monitor.clone(),
+            session.voices.clone(),
+        )
     };
     let original_voice = controller.session().current;
     let original_monitor = controller.session().settings.monitor_enabled;
-    say(&format!("LocalVoice soak: mic \"{input}\" -> \"{output}\", headphones \"{monitor}\", {seconds}s"));
+    say(&format!(
+        "LocalVoice soak: mic \"{input}\" -> \"{output}\", headphones \"{monitor}\", {seconds}s"
+    ));
     let mut failures = Vec::new();
 
     // 1. Pitch check through the real virtual cable with a test tone and the Deep voice.
@@ -105,7 +142,9 @@ pub fn run(seconds: u64) -> i32 {
             let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt();
             let found = peak_hz(tail, rate);
             let expected = 220.0 * 2f32.powf(voices[deep].params.pitch_semitones / 12.0);
-            say(&format!("cable loopback: rms {rms:.3}, pitch {found:.1} Hz (expected {expected:.1} Hz)"));
+            say(&format!(
+                "cable loopback: rms {rms:.3}, pitch {found:.1} Hz (expected {expected:.1} Hz)"
+            ));
             if rms < 0.01 || (found / expected - 1.0).abs() > 0.02 {
                 failures.push("virtual mic did not carry the pitch-shifted voice".to_string());
             }
@@ -120,7 +159,9 @@ pub fn run(seconds: u64) -> i32 {
         let samples = buffer.lock().unwrap().clone();
         let tail = &samples[samples.len().saturating_sub(rate as usize / 2)..];
         let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt();
-        say(&format!("cable level check (bypass, sent 0.212 rms): received {rms:.3}"));
+        say(&format!(
+            "cable level check (bypass, sent 0.212 rms): received {rms:.3}"
+        ));
     }
     shared.bypass.store(false, Relaxed);
 
@@ -161,7 +202,10 @@ pub fn run(seconds: u64) -> i32 {
     controller.stop();
     shared.monitor_volume.set(previous_volume);
     std::thread::sleep(Duration::from_millis(300));
-    say(&format!("soak: {step} voice/mute/bypass changes, {dropouts} dropouts, peak DSP load {:.1}%", max_load * 100.0));
+    say(&format!(
+        "soak: {step} voice/mute/bypass changes, {dropouts} dropouts, peak DSP load {:.1}%",
+        max_load * 100.0
+    ));
     if dropouts > 0 {
         failures.push(format!("{dropouts} dropouts"));
     }

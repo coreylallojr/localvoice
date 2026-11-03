@@ -9,7 +9,7 @@ use crate::voices::Params;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -95,7 +95,12 @@ impl Shared {
     }
 
     fn set_status(&self, mode: Mode, rate: u32, message: impl Into<String>, is_error: bool) {
-        *self.status.lock().unwrap() = Status { mode, rate, message: message.into(), is_error };
+        *self.status.lock().unwrap() = Status {
+            mode,
+            rate,
+            message: message.into(),
+            is_error,
+        };
     }
 }
 
@@ -103,7 +108,11 @@ impl Shared {
 pub fn latency_ms(params: &Params) -> f32 {
     let shifting = params.pitch_semitones != 0.0 || params.formant_semitones != 0.0;
     let denoise = if params.denoise { 10.0 } else { 0.0 };
-    let pitch = if shifting { crate::dsp::pitch::LATENCY as f32 / 48.0 } else { 0.0 };
+    let pitch = if shifting {
+        crate::dsp::pitch::LATENCY as f32 / 48.0
+    } else {
+        0.0
+    };
     20.0 + 12.0 + denoise + pitch
 }
 
@@ -136,7 +145,11 @@ pub fn spawn(shared: Arc<Shared>, notify: Arc<dyn Fn() + Send + Sync>) -> Sender
     sender
 }
 
-fn control_loop(shared: Arc<Shared>, receiver: Receiver<Command>, notify: Arc<dyn Fn() + Send + Sync>) {
+fn control_loop(
+    shared: Arc<Shared>,
+    receiver: Receiver<Command>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+) {
     let mut running: Option<Streams> = None;
     loop {
         match receiver.recv_timeout(Duration::from_millis(250)) {
@@ -186,7 +199,10 @@ fn error_callback(shared: &Arc<Shared>) -> impl FnMut(cpal::Error) + Send + 'sta
     let shared = shared.clone();
     move |error| {
         let text = error.to_string().to_lowercase();
-        if text.contains("not available") || text.contains("disconnected") || text.contains("invalidated") {
+        if text.contains("not available")
+            || text.contains("disconnected")
+            || text.contains("invalidated")
+        {
             shared.device_lost.store(true, Relaxed);
         }
     }
@@ -223,18 +239,33 @@ impl Reader {
 }
 
 fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), String> {
-    let mic = devices::find_input(&request.input)
-        .ok_or_else(|| format!("Microphone \"{}\" was not found. Click Refresh.", request.input))?;
-    let mic_config = mic.default_input_config().map_err(|e| format!("Microphone: {e}"))?;
+    let mic = devices::find_input(&request.input).ok_or_else(|| {
+        format!(
+            "Microphone \"{}\" was not found. Click Refresh.",
+            request.input
+        )
+    })?;
+    let mic_config = mic
+        .default_input_config()
+        .map_err(|e| format!("Microphone: {e}"))?;
     let rate = mic_config.sample_rate();
     let mic_channels = mic_config.channels() as usize;
 
     let (primary_name, monitor_name) = match request.mode {
         Mode::Live => (
-            request.virtual_mic.clone().ok_or("Install VB-CABLE to go live (click Set up).")?,
+            request
+                .virtual_mic
+                .clone()
+                .ok_or("Install VB-CABLE to go live (click Set up).")?,
             request.headphones.clone(),
         ),
-        _ => (request.headphones.clone().ok_or("Choose your headphones first.")?, None),
+        _ => (
+            request
+                .headphones
+                .clone()
+                .ok_or("Choose your headphones first.")?,
+            None,
+        ),
     };
     let primary = devices::find_output(&primary_name)
         .ok_or_else(|| format!("Output \"{primary_name}\" was not found. Click Refresh."))?;
@@ -259,7 +290,11 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
     let mut tone_phase = 0.0f32;
     let input_stream = mic
         .build_input_stream::<f32, _, _>(
-            cpal::StreamConfig { channels: mic_channels as u16, sample_rate: rate, buffer_size: cpal::BufferSize::Default },
+            cpal::StreamConfig {
+                channels: mic_channels as u16,
+                sample_rate: rate,
+                buffer_size: cpal::BufferSize::Default,
+            },
             move |data: &[f32], _| {
                 let gain = input_shared.input_gain.get();
                 let mut peak = 0.0f32;
@@ -292,13 +327,22 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
     let has_monitor = monitor.is_some();
     let output_shared = shared.clone();
     let mut chain = Chain::new(&request.params, rate);
-    let mut reader = Reader { consumer: mic_consumer, target, ceiling, primed: false };
+    let mut reader = Reader {
+        consumer: mic_consumer,
+        target,
+        ceiling,
+        primed: false,
+    };
     let mut block = vec![0.0f32; CHUNK];
     let mut failed = false;
     let mut switch = EffectSwitch::new(rate, !shared.bypass.load(Relaxed));
     let primary_stream = primary
         .build_output_stream::<f32, _, _>(
-            cpal::StreamConfig { channels: primary_channels as u16, sample_rate: rate, buffer_size: cpal::BufferSize::Default },
+            cpal::StreamConfig {
+                channels: primary_channels as u16,
+                sample_rate: rate,
+                buffer_size: cpal::BufferSize::Default,
+            },
             move |data: &mut [f32], _| {
                 let started = Instant::now();
                 if let Ok(mut pending) = output_shared.pending.try_lock()
@@ -320,13 +364,18 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
                     }
                     if !failed {
                         // Fail silent: a DSP bug must never leak the raw voice.
-                        failed = !catch_unwind(AssertUnwindSafe(|| switch.process(&mut chain, samples, !bypass)))
-                            .unwrap_or(false);
+                        failed = !catch_unwind(AssertUnwindSafe(|| {
+                            switch.process(&mut chain, samples, !bypass)
+                        }))
+                        .unwrap_or(false);
                     }
                     if failed {
                         samples.fill(0.0);
                     }
-                    for (frame, &sample) in frames.chunks_exact_mut(primary_channels).zip(samples.iter()) {
+                    for (frame, &sample) in frames
+                        .chunks_exact_mut(primary_channels)
+                        .zip(samples.iter())
+                    {
                         peak = peak.max(sample.abs());
                         let value = match mode {
                             Mode::Test => sample * volume,
@@ -341,7 +390,9 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
                 }
                 output_shared.output_level.set(peak);
                 let budget = data.len() as f32 / primary_channels as f32 / rate as f32;
-                output_shared.load.set(started.elapsed().as_secs_f32() / budget.max(1e-6));
+                output_shared
+                    .load
+                    .set(started.elapsed().as_secs_f32() / budget.max(1e-6));
             },
             error_callback(shared),
             None,
@@ -352,20 +403,34 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
 
     // Monitor ring → headphones while live.
     if let Some(monitor) = monitor {
-        let channels = monitor.default_output_config().map(|c| c.channels() as usize).unwrap_or(2);
+        let channels = monitor
+            .default_output_config()
+            .map(|c| c.channels() as usize)
+            .unwrap_or(2);
         let monitor_shared = shared.clone();
-        let mut reader = Reader { consumer: monitor_consumer, target, ceiling, primed: false };
+        let mut reader = Reader {
+            consumer: monitor_consumer,
+            target,
+            ceiling,
+            primed: false,
+        };
         let mut block = vec![0.0f32; CHUNK];
         let stream = monitor
             .build_output_stream::<f32, _, _>(
-                cpal::StreamConfig { channels: channels as u16, sample_rate: rate, buffer_size: cpal::BufferSize::Default },
+                cpal::StreamConfig {
+                    channels: channels as u16,
+                    sample_rate: rate,
+                    buffer_size: cpal::BufferSize::Default,
+                },
                 move |data: &mut [f32], _| {
                     let on = monitor_shared.monitor_on.load(Relaxed);
                     let volume = monitor_shared.monitor_volume.get();
                     for frames in data.chunks_mut(CHUNK * channels) {
                         let samples = &mut block[..frames.len() / channels];
                         reader.read(samples);
-                        for (frame, &sample) in frames.chunks_exact_mut(channels).zip(samples.iter()) {
+                        for (frame, &sample) in
+                            frames.chunks_exact_mut(channels).zip(samples.iter())
+                        {
                             frame.fill(if on { sample * volume } else { 0.0 });
                         }
                     }
@@ -378,7 +443,9 @@ fn open(shared: &Arc<Shared>, request: StartRequest) -> Result<(Streams, u32), S
     }
 
     for stream in &streams {
-        stream.play().map_err(|e| format!("Could not start audio: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| format!("Could not start audio: {e}"))?;
     }
     Ok((Streams { _streams: streams }, rate))
 }

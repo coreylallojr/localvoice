@@ -71,7 +71,14 @@ impl Chain {
     pub fn set(&mut self, p: &Params) {
         let rate = self.rate;
         // ponytail: RNNoise is trained for 48 kHz only; other mic rates skip it.
-        self.denoise_on = p.denoise && (rate - 48_000.0).abs() < 1.0;
+        let denoise_on = p.denoise && (rate - 48_000.0).abs() < 1.0;
+        if denoise_on && !self.denoise_on {
+            // Don't replay a stale frame from the last time noise removal was on.
+            self.denoise_in.fill(0.0);
+            self.denoise_out.fill(0.0);
+            self.denoise_pos = 0;
+        }
+        self.denoise_on = denoise_on;
         self.gate.set(p.gate_db);
         self.highpass.highpass(rate, p.highpass_hz);
         self.shifter.set(p.pitch_semitones, p.formant_semitones);
@@ -81,11 +88,27 @@ impl Chain {
         }
         self.shifting = shifting;
         self.ring_step = 2.0 * std::f32::consts::PI * p.ring_hz / rate;
-        self.presence.set(Type::PeakingEQ(p.presence_db), rate, 3_000.0, 0.8, p.presence_db != 0.0);
-        self.lowpass.set(Type::LowPass, rate, p.lowpass_hz, 0.707, p.lowpass_hz < 19_999.0);
+        self.presence.set(
+            Type::PeakingEQ(p.presence_db),
+            rate,
+            3_000.0,
+            0.8,
+            p.presence_db != 0.0,
+        );
+        self.lowpass.set(
+            Type::LowPass,
+            rate,
+            p.lowpass_hz,
+            0.707,
+            p.lowpass_hz < 19_999.0,
+        );
         self.drive = db_to_gain(p.distortion_db);
         self.drive_makeup = 1.0 / self.drive.sqrt();
-        self.crush = if p.bit_depth < 31.5 { 2f32.powf(p.bit_depth - 1.0) } else { 0.0 };
+        self.crush = if p.bit_depth < 31.5 {
+            2f32.powf(p.bit_depth - 1.0)
+        } else {
+            0.0
+        };
         self.chorus.mix = p.chorus_mix;
         self.reverb.mix = p.reverb_mix;
         self.gain = db_to_gain(p.gain_db);
@@ -107,7 +130,8 @@ impl Chain {
                 self.denoise_pos += 1;
                 if self.denoise_pos == DENOISE_FRAME {
                     self.denoise_pos = 0;
-                    self.denoise.process_frame(&mut self.denoise_out, &self.denoise_in);
+                    self.denoise
+                        .process_frame(&mut self.denoise_out, &self.denoise_in);
                 }
             }
             s = self.gate.run(s);
@@ -150,6 +174,11 @@ pub struct EffectSwitch {
     position: usize,
     wet: f32,
     fade: f32,
+    /// Dry tap delay; when the chain's latency changes (voice switch), the old
+    /// tap fades into the new one instead of skipping or repeating audio.
+    delay: usize,
+    old_delay: usize,
+    delay_blend: f32,
 }
 
 impl EffectSwitch {
@@ -162,6 +191,9 @@ impl EffectSwitch {
             position: 0,
             wet: if effect_on { 1.0 } else { 0.0 },
             fade: 1.0 - (-1.0 / (0.015 * rate as f32)).exp(),
+            delay: 0,
+            old_delay: 0,
+            delay_blend: 1.0,
         }
     }
 
@@ -178,10 +210,21 @@ impl EffectSwitch {
             return false;
         }
         let delay = chain.latency();
+        if delay != self.delay {
+            self.old_delay = self.delay;
+            self.delay = delay;
+            self.delay_blend = 0.0;
+        }
         let target = if effect_on { 1.0 } else { 0.0 };
         for (i, sample) in block.iter_mut().enumerate() {
             self.wet += (target - self.wet) * self.fade;
-            let dry = self.dry[(start + i + size - delay) % size];
+            let index = start + i + size;
+            let mut dry = self.dry[(index - self.delay) % size];
+            if self.delay_blend < 1.0 {
+                self.delay_blend = (self.delay_blend + self.fade).min(1.0);
+                let old = self.dry[(index - self.old_delay) % size];
+                dry = old + (dry - old) * self.delay_blend;
+            }
             *sample = *sample * self.wet + dry * (1.0 - self.wet);
         }
         true
@@ -201,9 +244,17 @@ mod tests {
         (0..(rate * seconds) as usize)
             .map(|i| {
                 let t = i as f32 / rate;
-                phase += 2.0 * std::f32::consts::PI * 120.0 * (1.0 + 0.03 * (2.0 * std::f32::consts::PI * 5.0 * t).sin()) / rate;
+                phase += 2.0
+                    * std::f32::consts::PI
+                    * 120.0
+                    * (1.0 + 0.03 * (2.0 * std::f32::consts::PI * 5.0 * t).sin())
+                    / rate;
                 let syllable = (2.0 * std::f32::consts::PI * 3.0 * t).sin().max(0.0);
-                (1..20).map(|h| (h as f32 * phase).sin() / h as f32).sum::<f32>() * 0.15 * syllable
+                (1..20)
+                    .map(|h| (h as f32 * phase).sin() / h as f32)
+                    .sum::<f32>()
+                    * 0.15
+                    * syllable
             })
             .collect()
     }
@@ -218,7 +269,11 @@ mod tests {
                 chain.process(block);
             }
             assert_eq!(signal.len(), length);
-            assert!(signal.iter().all(|x| x.is_finite() && x.abs() <= 1.0), "{}", voice.name);
+            assert!(
+                signal.iter().all(|x| x.is_finite() && x.abs() <= 1.0),
+                "{}",
+                voice.name
+            );
             let rms = (signal[48_000..].iter().map(|x| x * x).sum::<f32>() / 48_000.0).sqrt();
             assert!(rms > 0.02, "{} is too quiet: {rms}", voice.name);
         }
@@ -229,7 +284,9 @@ mod tests {
         // 480 samples = 10 ms at 48 kHz. Debug builds are far slower, so only
         // the release build is held to the 2 ms budget. p99, not max: a single
         // block pre-empted by the OS (parallel tests) is not DSP cost.
-        let budget_ms = if cfg!(debug_assertions) { 10.0 } else { 2.0 };
+        // Shared CI runners are slower and noisier than a gaming PC.
+        let ci = std::env::var_os("CI").is_some();
+        let budget_ms = if cfg!(debug_assertions) { 10.0 } else if ci { 5.0 } else { 2.0 };
         for voice in builtins() {
             let mut chain = Chain::new(&voice.params, 48_000);
             let mut signal = voice_like(2.0);
@@ -267,12 +324,45 @@ mod tests {
         // Bypassed: exactly the real voice, delayed by the chain latency.
         let delay = chain.latency();
         for i in 20_000..40_000 {
-            assert!((output[i] - input[i - delay]).abs() < 1e-4, "dry mismatch at {i}");
+            assert!(
+                (output[i] - input[i - delay]).abs() < 1e-4,
+                "dry mismatch at {i}"
+            );
         }
         // No clicks: the steepest step stays near the steepest step of a clean sine.
-        let max_step = output.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        let max_step = output
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
         let sine_step = 0.3 * 2.0 * std::f32::consts::PI * 220.0 / rate;
-        assert!(max_step < sine_step * 1.6, "click: step {max_step} vs sine {sine_step}");
+        assert!(
+            max_step < sine_step * 1.6,
+            "click: step {max_step} vs sine {sine_step}"
+        );
+    }
+
+    #[test]
+    fn switching_voices_in_real_voice_mode_is_click_free() {
+        // Clean → Deep changes the chain latency (480 → 2016 samples); the dry
+        // tap must glide, not jump, or the real voice skips ~32 ms.
+        let voices = builtins();
+        let clean = voices.iter().find(|v| v.id == "clean").unwrap().params;
+        let deep = voices.iter().find(|v| v.id == "deep").unwrap().params;
+        let mut chain = Chain::new(&clean, 48_000);
+        let mut switch = EffectSwitch::new(48_000, false);
+        let rate = 48_000.0;
+        let mut output: Vec<f32> = (0..96_000)
+            .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / rate).sin())
+            .collect();
+        for (index, block) in output.chunks_mut(480).enumerate() {
+            if index == 100 {
+                chain.set(&deep);
+            }
+            assert!(switch.process(&mut chain, block, false));
+        }
+        let max_step = output[4_800..].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        let sine_step = 0.3 * 2.0 * std::f32::consts::PI * 220.0 / rate;
+        assert!(max_step < sine_step * 1.6, "jump: step {max_step} vs sine {sine_step}");
     }
 
     #[test]

@@ -11,7 +11,13 @@ pub struct DeviceLists {
     pub default_output: Option<String>,
 }
 
-const VIRTUAL_TERMS: [&str; 5] = ["virtual audio", "virtual mic", "cable input", "vb-audio", "voicemeeter input"];
+const VIRTUAL_TERMS: [&str; 5] = [
+    "virtual audio",
+    "virtual mic",
+    "cable input",
+    "vb-audio",
+    "voicemeeter input",
+];
 
 pub fn is_virtual(name: &str) -> bool {
     let name = name.to_lowercase();
@@ -33,11 +39,17 @@ pub fn rank_virtual(outputs: &[String]) -> Vec<String> {
 
 /// Headphones: Windows' default playback if it is a real device; otherwise the
 /// headset that owns the chosen mic, e.g. "(PRO X 2 LIGHTSPEED)"; otherwise the first.
-pub fn pick_monitor(monitors: &[String], default_output: Option<&str>, mic: Option<&str>) -> Option<String> {
+pub fn pick_monitor(
+    monitors: &[String],
+    default_output: Option<&str>,
+    mic: Option<&str>,
+) -> Option<String> {
     if let Some(default) = default_output.filter(|d| monitors.iter().any(|m| m == d)) {
         return Some(default.to_string());
     }
-    let owner = mic.and_then(|mic| mic.split_once('(')).map(|(_, rest)| rest.trim_end_matches(')'));
+    let owner = mic
+        .and_then(|mic| mic.split_once('('))
+        .map(|(_, rest)| rest.trim_end_matches(')'));
     if let Some(owner) = owner {
         let tag = format!("({owner})");
         if let Some(found) = monitors.iter().find(|m| m.contains(&tag)) {
@@ -62,7 +74,10 @@ pub fn list() -> DeviceLists {
         .map(|devices| devices.filter_map(|d| name(&d)).collect())
         .unwrap_or_default();
     DeviceLists {
-        inputs: inputs.into_iter().filter(|n| !is_virtual_capture(n)).collect(),
+        inputs: inputs
+            .into_iter()
+            .filter(|n| !is_virtual_capture(n))
+            .collect(),
         virtual_outputs: rank_virtual(&outputs),
         monitors: outputs.iter().filter(|n| !is_virtual(n)).cloned().collect(),
         default_input: host.default_input_device().and_then(|d| name(&d)),
@@ -74,15 +89,23 @@ pub fn list() -> DeviceLists {
 /// ourselves or LocalVoice would feed back into itself.
 fn is_virtual_capture(name: &str) -> bool {
     let name = name.to_lowercase();
-    name.contains("cable output") || name.contains("vb-audio point") || name.contains("voicemeeter out")
+    name.contains("cable output")
+        || name.contains("vb-audio point")
+        || name.contains("voicemeeter out")
 }
 
 pub fn find_input(name: &str) -> Option<cpal::Device> {
-    cpal::default_host().input_devices().ok()?.find(|d| self::name(d).as_deref() == Some(name))
+    cpal::default_host()
+        .input_devices()
+        .ok()?
+        .find(|d| self::name(d).as_deref() == Some(name))
 }
 
 pub fn find_output(name: &str) -> Option<cpal::Device> {
-    cpal::default_host().output_devices().ok()?.find(|d| self::name(d).as_deref() == Some(name))
+    cpal::default_host()
+        .output_devices()
+        .ok()?
+        .find(|d| self::name(d).as_deref() == Some(name))
 }
 
 #[cfg(test)]
@@ -103,19 +126,33 @@ mod tests {
         ]);
         assert_eq!(
             rank_virtual(&outputs),
-            names(&["CABLE Input (VB-Audio Virtual Cable)", "Voicemeeter Input (VB-Audio Voicemeeter VAIO)"])
+            names(&[
+                "CABLE Input (VB-Audio Virtual Cable)",
+                "Voicemeeter Input (VB-Audio Voicemeeter VAIO)"
+            ])
         );
     }
 
     #[test]
     fn monitor_falls_back_to_the_mic_headset_when_default_is_virtual() {
-        let monitors = names(&["CU34G2XP (NVIDIA High Definition Audio)", "Speakers (PRO X 2 LIGHTSPEED)"]);
+        let monitors = names(&[
+            "CU34G2XP (NVIDIA High Definition Audio)",
+            "Speakers (PRO X 2 LIGHTSPEED)",
+        ]);
         assert_eq!(
-            pick_monitor(&monitors, Some("CABLE Input (VB-Audio Virtual Cable)"), Some("Microphone (PRO X 2 LIGHTSPEED)")),
+            pick_monitor(
+                &monitors,
+                Some("CABLE Input (VB-Audio Virtual Cable)"),
+                Some("Microphone (PRO X 2 LIGHTSPEED)")
+            ),
             Some("Speakers (PRO X 2 LIGHTSPEED)".into())
         );
         assert_eq!(
-            pick_monitor(&monitors, Some("CU34G2XP (NVIDIA High Definition Audio)"), None),
+            pick_monitor(
+                &monitors,
+                Some("CU34G2XP (NVIDIA High Definition Audio)"),
+                None
+            ),
             Some("CU34G2XP (NVIDIA High Definition Audio)".into())
         );
     }

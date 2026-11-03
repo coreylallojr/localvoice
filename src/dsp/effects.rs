@@ -1,6 +1,6 @@
 //! Small allocation-free effects. Buffers are sized once in `new`.
 
-use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz, Type, Q_BUTTERWORTH_F32};
+use biquad::{Biquad, Coefficients, DirectForm2Transposed, Q_BUTTERWORTH_F32, ToHertz, Type};
 
 pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
@@ -17,8 +17,17 @@ pub struct Filter {
 
 impl Filter {
     pub fn new() -> Self {
-        let pass = Coefficients { a1: 0.0, a2: 0.0, b0: 1.0, b1: 0.0, b2: 0.0 };
-        Self { inner: DirectForm2Transposed::<f32>::new(pass), active: false }
+        let pass = Coefficients {
+            a1: 0.0,
+            a2: 0.0,
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+        };
+        Self {
+            inner: DirectForm2Transposed::<f32>::new(pass),
+            active: false,
+        }
     }
 
     /// Retunes in place, keeping the filter state so sliders do not click.
@@ -70,7 +79,11 @@ impl Gate {
     }
 
     pub fn set(&mut self, threshold_db: f32) {
-        self.threshold = if threshold_db <= -99.0 { 0.0 } else { db_to_gain(threshold_db) };
+        self.threshold = if threshold_db <= -99.0 {
+            0.0
+        } else {
+            db_to_gain(threshold_db)
+        };
     }
 
     #[inline]
@@ -91,7 +104,11 @@ impl Gate {
             self.held = self.held.saturating_sub(1);
             self.held > 0
         };
-        let (target, coef) = if open { (1.0, self.open_coef) } else { (0.0, self.close_coef) };
+        let (target, coef) = if open {
+            (1.0, self.open_coef)
+        } else {
+            (0.0, self.close_coef)
+        };
         self.gain = target + coef * (self.gain - target);
         x * self.gain
     }
@@ -127,7 +144,11 @@ impl Compressor {
         let level_db = 10.0 * (self.power + 1e-12).log10();
         let over = (level_db - Self::THRESHOLD_DB).max(0.0);
         let target = db_to_gain(-over * (1.0 - 1.0 / Self::RATIO) + Self::MAKEUP_DB);
-        let coef = if target < self.gain { self.attack } else { self.release };
+        let coef = if target < self.gain {
+            self.attack
+        } else {
+            self.release
+        };
         self.gain = target + coef * (self.gain - target);
         x * self.gain
     }
@@ -143,13 +164,24 @@ impl Limiter {
     const CEILING: f32 = 0.89; // -1 dBFS
 
     pub fn new(rate: f32) -> Self {
-        Self { gain: 1.0, release: coefficient(80.0, rate) }
+        Self {
+            gain: 1.0,
+            release: coefficient(80.0, rate),
+        }
     }
 
     #[inline]
     pub fn run(&mut self, x: f32) -> f32 {
-        let needed = if x.abs() * self.gain > Self::CEILING { Self::CEILING / x.abs() } else { 1.0 };
-        self.gain = if needed < self.gain { needed } else { 1.0 + self.release * (self.gain - 1.0) };
+        let needed = if x.abs() * self.gain > Self::CEILING {
+            Self::CEILING / x.abs()
+        } else {
+            1.0
+        };
+        self.gain = if needed < self.gain {
+            needed
+        } else {
+            1.0 + self.release * (self.gain - 1.0)
+        };
         (x * self.gain).clamp(-Self::CEILING, Self::CEILING)
     }
 }
@@ -187,7 +219,8 @@ impl Chorus {
         let read = self.position as f32 + size as f32 - delay;
         let low = read.floor() as usize;
         let fraction = read - low as f32;
-        let wet = self.buffer[low % size] * (1.0 - fraction) + self.buffer[(low + 1) % size] * fraction;
+        let wet =
+            self.buffer[low % size] * (1.0 - fraction) + self.buffer[(low + 1) % size] * fraction;
         self.position = (self.position + 1) % size;
         x * (1.0 - self.mix * 0.5) + wet * self.mix
     }
@@ -210,8 +243,14 @@ impl Reverb {
         let scale = rate / 44_100.0;
         let len = |n: usize| ((n as f32 * scale) as usize).max(1);
         Self {
-            combs: Self::COMBS.iter().map(|&n| (vec![0.0; len(n)], 0, 0.0)).collect(),
-            allpasses: Self::ALLPASSES.iter().map(|&n| (vec![0.0; len(n)], 0)).collect(),
+            combs: Self::COMBS
+                .iter()
+                .map(|&n| (vec![0.0; len(n)], 0, 0.0))
+                .collect(),
+            allpasses: Self::ALLPASSES
+                .iter()
+                .map(|&n| (vec![0.0; len(n)], 0))
+                .collect(),
             mix: 0.0,
         }
     }

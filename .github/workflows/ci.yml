@@ -16,22 +16,14 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
       - run: cargo build --release
+      # Hosted runners have no GPU/OpenGL 2 for the window, so smoke-test the
+      # packaged exe headlessly: settings, voices, device enumeration, DSP.
       - name: Smoke-test packaged app
         shell: pwsh
         run: |
-          $app = Start-Process .\target\release\LocalVoice.exe -PassThru
-          try {
-            $deadline = (Get-Date).AddSeconds(20)
-            do {
-              Start-Sleep -Seconds 1
-              $app.Refresh()
-              if ($app.HasExited) { throw "LocalVoice exited during startup (code $($app.ExitCode))" }
-              $started = $app.MainWindowTitle -eq "LocalVoice"
-            } until ($started -or (Get-Date) -ge $deadline)
-            if (-not $started) { throw "LocalVoice window did not open" }
-          } finally {
-            Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-          }
+          $p = Start-Process ./target/release/LocalVoice.exe -ArgumentList "--self-check" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "LocalVoice --self-check failed ($($p.ExitCode))" }
+          Get-Content "$env:APPDATA/LocalVoice/soak.log"
       - uses: actions/upload-artifact@v4
         with:
           name: LocalVoice-windows-x64

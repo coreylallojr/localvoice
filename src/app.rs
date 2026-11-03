@@ -55,7 +55,11 @@ impl Settings {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         // v0.2 stored labels like "Microphone (X) [Windows WASAPI]".
-        for name in [&mut settings.input, &mut settings.output, &mut settings.monitor] {
+        for name in [
+            &mut settings.input,
+            &mut settings.output,
+            &mut settings.monitor,
+        ] {
             if let Some((device, _)) = name.rsplit_once(" [") {
                 *name = device.to_string();
             }
@@ -96,7 +100,10 @@ impl Controller {
         let settings_path = root.join("settings.json");
         let settings = Settings::load(&settings_path);
         let voices = store.load();
-        let current = voices.iter().position(|v| v.name == settings.character).unwrap_or(0);
+        let current = voices
+            .iter()
+            .position(|v| v.name == settings.character)
+            .unwrap_or(0);
         let shared = Shared::new();
         let engine = engine::spawn(shared.clone(), notify.clone());
         let controller = Arc::new(Self {
@@ -117,9 +124,12 @@ impl Controller {
         {
             let session = controller.session();
             let s = &controller.shared;
-            s.input_gain.set(crate::dsp::effects::db_to_gain(session.settings.input_gain_db));
+            s.input_gain.set(crate::dsp::effects::db_to_gain(
+                session.settings.input_gain_db,
+            ));
             s.monitor_volume.set(session.settings.monitor_volume);
-            s.monitor_on.store(session.settings.monitor_enabled, Relaxed);
+            s.monitor_on
+                .store(session.settings.monitor_enabled, Relaxed);
             // Push-to-talk switches the voice effect: off (real voice) until the key is used.
             s.bypass.store(session.settings.ptt_enabled, Relaxed);
         }
@@ -151,8 +161,12 @@ impl Controller {
             s.output = lists.virtual_outputs.first().cloned().unwrap_or_default();
         }
         if !lists.monitors.contains(&s.monitor) {
-            s.monitor = devices::pick_monitor(&lists.monitors, lists.default_output.as_deref(), Some(&s.input))
-                .unwrap_or_default();
+            s.monitor = devices::pick_monitor(
+                &lists.monitors,
+                lists.default_output.as_deref(),
+                Some(&s.input),
+            )
+            .unwrap_or_default();
         }
         session.devices = lists;
         drop(session);
@@ -189,7 +203,11 @@ impl Controller {
     }
 
     pub fn toggle_live(&self) {
-        if self.mode() == Mode::Live { self.stop() } else { self.go_live() }
+        if self.mode() == Mode::Live {
+            self.stop()
+        } else {
+            self.go_live()
+        }
     }
 
     /// Headphone button: while live it toggles monitoring; otherwise a private test.
@@ -250,11 +268,10 @@ impl Controller {
             voice.id = session.voices[current].id.clone();
         }
         let voice = voice.validated()?;
-        let taken = session
-            .voices
-            .iter()
-            .enumerate()
-            .any(|(i, v)| v.name.eq_ignore_ascii_case(&voice.name) && !(replacing && i == current));
+        let taken =
+            session.voices.iter().enumerate().any(|(i, v)| {
+                v.name.eq_ignore_ascii_case(&voice.name) && !(replacing && i == current)
+            });
         if taken {
             return Err(format!("A voice named \"{}\" already exists.", voice.name));
         }
@@ -265,7 +282,9 @@ impl Controller {
             session.voices.push(voice);
             session.voices.len() - 1
         };
-        self.store.save(&session.voices).map_err(|e| e.to_string())?;
+        self.store
+            .save(&session.voices)
+            .map_err(|e| e.to_string())?;
         drop(session);
         self.select_voice(index);
         Ok(())
@@ -278,7 +297,9 @@ impl Controller {
             return Err("Built-in voices cannot be deleted.".into());
         }
         session.voices.remove(current);
-        self.store.save(&session.voices).map_err(|e| e.to_string())?;
+        self.store
+            .save(&session.voices)
+            .map_err(|e| e.to_string())?;
         drop(session);
         self.select_voice(0);
         Ok(())
@@ -289,14 +310,20 @@ impl Controller {
         let mut session = self.session();
         let base = voice.name.clone();
         let mut number = 2;
-        while session.voices.iter().any(|v| v.name.eq_ignore_ascii_case(&voice.name)) {
+        while session
+            .voices
+            .iter()
+            .any(|v| v.name.eq_ignore_ascii_case(&voice.name))
+        {
             voice.name = format!("{base} ({number})");
             number += 1;
         }
         let name = voice.name.clone();
         session.voices.push(voice);
         let index = session.voices.len() - 1;
-        self.store.save(&session.voices).map_err(|e| e.to_string())?;
+        self.store
+            .save(&session.voices)
+            .map_err(|e| e.to_string())?;
         drop(session);
         self.select_voice(index);
         Ok(name)
@@ -347,7 +374,9 @@ impl Controller {
 
     pub fn set_input_gain_db(&self, db: f32) {
         self.session().settings.input_gain_db = db;
-        self.shared.input_gain.set(crate::dsp::effects::db_to_gain(db));
+        self.shared
+            .input_gain
+            .set(crate::dsp::effects::db_to_gain(db));
     }
 
     pub fn set_monitor_volume(&self, volume: f32) {

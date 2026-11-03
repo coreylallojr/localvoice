@@ -142,35 +142,110 @@ fn builtin(id: &str, name: &str, description: &str, params: Params) -> Voice {
 pub fn builtins() -> Vec<Voice> {
     let base = Params::default();
     vec![
-        builtin("clean", "Clean", "Noise removal, clarity and leveling", Params { denoise: true, ..base }),
-        builtin("deep", "Deep", "Lower, natural-sounding voice", Params {
-            pitch_semitones: -4.0, lowpass_hz: 14_000.0, presence_db: 1.0, denoise: true, ..base
-        }),
-        builtin("bright", "Bright", "Higher, natural-sounding voice", Params {
-            pitch_semitones: 3.0, highpass_hz: 110.0, presence_db: 2.5, denoise: true, ..base
-        }),
-        builtin("demon", "Demon", "Low pitch, huge throat, grit", Params {
-            pitch_semitones: -7.0, formant_semitones: -4.0, lowpass_hz: 9_000.0,
-            distortion_db: 8.0, chorus_mix: 0.18, reverb_mix: 0.08, ..base
-        }),
-        builtin("robot", "Robot", "Metallic ring-modulated machine voice", Params {
-            ring_hz: 55.0, bit_depth: 10.0, chorus_mix: 0.15, presence_db: 3.0, gain_db: 3.0, ..base
-        }),
-        builtin("radio", "Radio", "Narrow-band broadcast effect", Params {
-            highpass_hz: 300.0, lowpass_hz: 3_400.0, distortion_db: 4.0, bit_depth: 12.0, ..base
-        }),
-        builtin("giant", "Giant", "Very low cinematic voice", Params {
-            pitch_semitones: -10.0, formant_semitones: -5.0, lowpass_hz: 7_000.0,
-            presence_db: -2.0, reverb_mix: 0.12, ..base
-        }),
-        builtin("sprite", "Sprite", "High, playful character", Params {
-            pitch_semitones: 7.0, formant_semitones: 4.0, highpass_hz: 160.0, presence_db: 3.0, ..base
-        }),
+        builtin(
+            "clean",
+            "Clean",
+            "Noise removal, clarity and leveling",
+            Params {
+                denoise: true,
+                ..base
+            },
+        ),
+        builtin(
+            "deep",
+            "Deep",
+            "Lower, natural-sounding voice",
+            Params {
+                pitch_semitones: -4.0,
+                lowpass_hz: 14_000.0,
+                presence_db: 1.0,
+                denoise: true,
+                ..base
+            },
+        ),
+        builtin(
+            "bright",
+            "Bright",
+            "Higher, natural-sounding voice",
+            Params {
+                pitch_semitones: 3.0,
+                highpass_hz: 110.0,
+                presence_db: 2.5,
+                denoise: true,
+                ..base
+            },
+        ),
+        builtin(
+            "demon",
+            "Demon",
+            "Low pitch, huge throat, grit",
+            Params {
+                pitch_semitones: -7.0,
+                formant_semitones: -4.0,
+                lowpass_hz: 9_000.0,
+                distortion_db: 8.0,
+                chorus_mix: 0.18,
+                reverb_mix: 0.08,
+                ..base
+            },
+        ),
+        builtin(
+            "robot",
+            "Robot",
+            "Metallic ring-modulated machine voice",
+            Params {
+                ring_hz: 55.0,
+                bit_depth: 10.0,
+                chorus_mix: 0.15,
+                presence_db: 3.0,
+                gain_db: 3.0,
+                ..base
+            },
+        ),
+        builtin(
+            "radio",
+            "Radio",
+            "Narrow-band broadcast effect",
+            Params {
+                highpass_hz: 300.0,
+                lowpass_hz: 3_400.0,
+                distortion_db: 4.0,
+                bit_depth: 12.0,
+                ..base
+            },
+        ),
+        builtin(
+            "giant",
+            "Giant",
+            "Very low cinematic voice",
+            Params {
+                pitch_semitones: -10.0,
+                formant_semitones: -5.0,
+                lowpass_hz: 7_000.0,
+                presence_db: -2.0,
+                reverb_mix: 0.12,
+                ..base
+            },
+        ),
+        builtin(
+            "sprite",
+            "Sprite",
+            "High, playful character",
+            Params {
+                pitch_semitones: 7.0,
+                formant_semitones: 4.0,
+                highpass_hz: 160.0,
+                presence_db: 3.0,
+                ..base
+            },
+        ),
     ]
 }
 
 pub fn data_dir() -> PathBuf {
-    let root = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into());
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".".into());
     root.join("LocalVoice")
 }
 
@@ -181,7 +256,9 @@ pub struct Store {
 impl Store {
     pub fn new(root: &Path) -> Self {
         let _ = std::fs::create_dir_all(root);
-        Self { path: root.join("characters.json") }
+        Self {
+            path: root.join("characters.json"),
+        }
     }
 
     /// Built-ins followed by saved customs. A corrupt file loads as no customs.
@@ -190,14 +267,24 @@ impl Store {
             .and_then(|text| serde_json::from_str::<Vec<Voice>>(&text).ok())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|voice| Voice { builtin: false, ..voice }.validated().ok())
+            .filter_map(|voice| {
+                Voice {
+                    builtin: false,
+                    ..voice
+                }
+                .validated()
+                .ok()
+            })
             .collect();
         builtins().into_iter().chain(custom).collect()
     }
 
     pub fn save(&self, voices: &[Voice]) -> std::io::Result<()> {
         let custom: Vec<&Voice> = voices.iter().filter(|v| !v.builtin).collect();
-        write_atomic(&self.path, serde_json::to_string_pretty(&custom)?.as_bytes())
+        write_atomic(
+            &self.path,
+            serde_json::to_string_pretty(&custom)?.as_bytes(),
+        )
     }
 }
 
@@ -233,7 +320,9 @@ pub fn import_pack(path: &Path) -> Result<Voice, String> {
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|e| e.to_string())?;
         total += entry.size();
-        let name = entry.name().map_err(|_| "Voice pack contains an unsafe path.".to_string())?;
+        let name = entry
+            .name()
+            .map_err(|_| "Voice pack contains an unsafe path.".to_string())?;
         let unsafe_path = Path::new(name.as_ref())
             .components()
             .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
@@ -251,18 +340,27 @@ pub fn import_pack(path: &Path) -> Result<Voice, String> {
         .take(1024 * 1024)
         .read_to_string(&mut text)
         .map_err(|e| e.to_string())?;
-    let manifest: Manifest = serde_json::from_str(&text).map_err(|e| format!("Bad manifest: {e}"))?;
+    let manifest: Manifest =
+        serde_json::from_str(&text).map_err(|e| format!("Bad manifest: {e}"))?;
     if manifest.schema != SCHEMA_VERSION || manifest.engine != "dsp" {
         return Err("This version imports LocalVoice DSP packs only.".into());
     }
-    Voice { id: new_id(), builtin: false, ..manifest.character }.validated()
+    Voice {
+        id: new_id(),
+        builtin: false,
+        ..manifest.character
+    }
+    .validated()
 }
 
 pub fn export_pack(voice: &Voice, path: &Path) -> Result<(), String> {
     let manifest = Manifest {
         schema: SCHEMA_VERSION,
         engine: "dsp".into(),
-        character: Voice { builtin: false, ..voice.clone() },
+        character: Voice {
+            builtin: false,
+            ..voice.clone()
+        },
     };
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipWriter::new(file);
@@ -270,7 +368,11 @@ pub fn export_pack(voice: &Voice, path: &Path) -> Result<(), String> {
         .start_file("manifest.json", zip::write::SimpleFileOptions::default())
         .map_err(|e| e.to_string())?;
     archive
-        .write_all(serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?.as_bytes())
+        .write_all(
+            serde_json::to_string_pretty(&manifest)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
         .map_err(|e| e.to_string())?;
     archive.finish().map_err(|e| e.to_string())?;
     Ok(())
@@ -289,7 +391,10 @@ mod tests {
     #[test]
     fn builtins_are_valid() {
         for voice in builtins() {
-            voice.clone().validated().unwrap_or_else(|e| panic!("{}: {e}", voice.name));
+            voice
+                .clone()
+                .validated()
+                .unwrap_or_else(|e| panic!("{}: {e}", voice.name));
         }
     }
 
@@ -321,7 +426,11 @@ mod tests {
             id: "x".into(),
             name: "Mine".into(),
             description: String::new(),
-            params: Params { pitch_semitones: 2.0, ring_hz: 40.0, ..Params::default() },
+            params: Params {
+                pitch_semitones: 2.0,
+                ring_hz: 40.0,
+                ..Params::default()
+            },
             builtin: false,
         };
         voices.push(custom.clone());
@@ -340,13 +449,22 @@ mod tests {
         let dir = temp_dir("unsafe");
         let pack = dir.join("bad.voicepack");
         let mut archive = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
-        archive.start_file("../manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+        archive
+            .start_file("../manifest.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
         archive.write_all(b"{}").unwrap();
         archive.finish().unwrap();
         assert!(import_pack(&pack).unwrap_err().contains("unsafe path"));
 
         std::fs::write(&pack, b"not a zip").unwrap();
         assert!(import_pack(&pack).is_err());
-        assert!(Params { pitch_semitones: 30.0, ..Params::default() }.validate().is_err());
+        assert!(
+            Params {
+                pitch_semitones: 30.0,
+                ..Params::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

@@ -44,7 +44,10 @@ pub fn vk_from_name(name: &str) -> Option<i32> {
     if let Some(number) = name.strip_prefix('f').and_then(|n| n.parse::<i32>().ok()) {
         return (1..=24).contains(&number).then_some(0x6F + number);
     }
-    if let Some(number) = name.strip_prefix("numpad_").and_then(|n| n.parse::<i32>().ok()) {
+    if let Some(number) = name
+        .strip_prefix("numpad_")
+        .and_then(|n| n.parse::<i32>().ok())
+    {
         return (0..=9).contains(&number).then_some(0x60 + number);
     }
     if let Some(code) = name.strip_prefix("vk_").and_then(|n| n.parse::<i32>().ok()) {
@@ -99,7 +102,10 @@ fn run(controller: Arc<Controller>) {
         std::thread::sleep(Duration::from_millis(5));
         let (capturing, ptt_vk) = {
             let session = controller.session();
-            (session.capturing_key, vk_from_name(&session.settings.ptt_key))
+            (
+                session.capturing_key,
+                vk_from_name(&session.settings.ptt_key),
+            )
         };
         // Only scan every key while capturing; otherwise poll the handful we use.
         let mut now = [false; 256];
@@ -108,9 +114,11 @@ fn run(controller: Arc<Controller>) {
                 *state = down(vk as i32);
             }
         } else {
-            for vk in [VK_SHIFT, VK_CONTROL, VK_SPACE, VK_LEFT, VK_RIGHT, VK_B, VK_M]
-                .into_iter()
-                .chain(ptt_vk)
+            for vk in [
+                VK_SHIFT, VK_CONTROL, VK_SPACE, VK_LEFT, VK_RIGHT, VK_B, VK_M,
+            ]
+            .into_iter()
+            .chain(ptt_vk)
             {
                 now[vk as usize] = down(vk);
             }
@@ -119,9 +127,13 @@ fn run(controller: Arc<Controller>) {
 
         if capturing {
             // Skip left/right mouse (clicking the button) and bare modifiers.
-            let skip = [0x01, 0x02, 0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0x5B, 0x5C];
+            let skip = [
+                0x01, 0x02, 0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0x5B, 0x5C,
+            ];
             if let Some(vk) = (1..255).find(|&vk| pressed(vk) && !skip.contains(&vk)) {
                 controller.captured_key(name_from_vk(vk));
+                // The new key is still held; its release must not count as a PTT press.
+                ptt_down = true;
             }
         } else if let Some(vk) = ptt_vk {
             let is_down = now[vk as usize];
@@ -158,7 +170,16 @@ mod tests {
 
     #[test]
     fn key_names_round_trip_and_accept_v02_names() {
-        for name in ["f8", "caps_lock", "v", "7", "space", "mouse_4", "numpad_3", "f24"] {
+        for name in [
+            "f8",
+            "caps_lock",
+            "v",
+            "7",
+            "space",
+            "mouse_4",
+            "numpad_3",
+            "f24",
+        ] {
             let vk = vk_from_name(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(name_from_vk(vk), name);
         }
