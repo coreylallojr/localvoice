@@ -6,11 +6,14 @@ Make locally processed and locally trained character voices easy enough to use a
 
 ## Phase 1 — Impressive DSP MVP
 
-Status: Complete in v0.2.
+Status: Complete. v0.2 was Python; v0.3.0 rewrote it in Rust (cpal, egui).
 
-Scope: single-file launcher, persisted device setup, system tray, configurable hold/toggle push-to-talk, headphone monitoring, character editor, safe DSP voice packs, CI and public Windows releases.
+Scope: single-file executable, persisted device setup, system tray, push-to-talk voice (hold/toggle effect switching), headphone monitoring, live-preview voice editor, formant-preserving pitch shifting, RNNoise noise removal, safe DSP voice packs, CI and public Windows releases.
 
-Acceptance: clean-machine package launches without Python; live audio and separate monitoring work at 48 kHz; PTT never leaks dry audio; settings survive restart.
+Evidence (v0.3.0, this dev PC: PRO X 2 headset + VB-CABLE 3.3.1.7):
+- `--soak` passes: 0 dropouts over 20 s of voice/mute/bypass switching, peak DSP load 2%.
+- A test tone through CABLE Output arrives at the target pitch (Deep: 175.0 Hz measured, 174.6 Hz expected).
+- Bypass passes level 1:1.
 
 ## Phase 2 — Media ingestion and dataset workbench
 
@@ -32,7 +35,7 @@ Status: Planned.
 
 Benchmark current RVC/Applio, Beatrice, Seed-VC-class zero-shot, LLVC and ONNX-native options on representative NVIDIA, AMD/DirectML and CPU hardware. Measure end-to-end latency, real-time factor, speaker similarity, intelligibility, memory use and model licensing.
 
-Define one streaming engine contract for load, warmup, process, reset and unload. Keep Python engines in isolated workers and prefer ONNX Runtime for the distributable path.
+Define one streaming engine contract for load, warmup, process, reset and unload (today `dsp::Chain` is the only engine). Keep any Python engines in isolated worker processes and prefer ONNX Runtime (`ort` crate) for the distributable path.
 
 Acceptance: the chosen trained and zero-shot engines meet documented quality/latency targets and can crash without taking down or leaking through the audio path.
 

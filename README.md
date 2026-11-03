@@ -1,69 +1,70 @@
 # LocalVoice
 
-LocalVoice is a fully local, real-time Windows voice changer. It captures a physical microphone, applies a character preset, and sends the result to any output device. Point it at a virtual audio cable and every application can use the changed voice as an ordinary microphone.
+LocalVoice is a fully local, low-latency voice changer for Windows, written in Rust. It captures your microphone, applies a voice, and sends the result to a virtual microphone, so Discord, games, OBS and browsers hear the changed voice. It uses about 1–3% of one CPU core, so you can leave it running while you game.
 
-No account, cloud service, telemetry, or network connection is used while running.
+No account, cloud service, telemetry or network connection is used.
 
-## What works in v0.2.2
+## Features (v0.3.0)
 
-- Live microphone processing with eight bundled characters
-- Pitch shift, gate, EQ, compression, distortion, bit crushing, chorus and reverb
-- Configurable push to talk with hold and toggle modes
-- Global hotkeys for live/stop, mute, bypass and character switching
-- One-click headphone testing that works before a virtual microphone is installed
-- System-tray controls and duplicate-instance protection
-- First-run guidance and persistent device/hotkey settings
-- Full custom character editor for pitch, gate, tone, grit, bit depth, chorus, reverb and gain
-- Safe `.voicepack` import and export
-- Input/output meters and fail-silent audio errors
-- Any Windows input/output device supported by PortAudio/WASAPI
+- **Natural pitch and formant shifting.** A phase-vocoder shifter with spectral-envelope formant control: deep or high voices without the chipmunk effect, or cartoon shifts when you want them.
+- **Noise removal.** RNNoise via [nnnoiseless](https://github.com/jneem/nnnoiseless) removes keyboard, fan and room noise. Also included: a hysteresis noise gate, compressor, EQ, grit, bit crush, ring modulator, chorus, Freeverb reverb and a limiter.
+- **Eight built-in voices:** Clean, Deep, Bright, Demon, Robot, Radio, Giant and Sprite.
+- **Voice editor with live preview.** Every slider changes the sound as you drag it. Save, save as new, revert, and import/export `.voicepack` files (v0.2 packs still load).
+- **Push-to-talk voice.** Your mic always transmits; the key switches the voice effect on. *Hold* uses the effect only while the key is held; *Toggle* switches it on/off with each press. Any key or mouse side button works, and switching is crossfaded so it never clicks.
+- **Global hotkeys that work inside games:** Ctrl+Shift+Space go live, Ctrl+Shift+M mute, Ctrl+Shift+B effect on/off, Ctrl+Shift+Left/Right switch voice.
+- **Headphone test and monitor**, mic gain, headphone volume, level meters, and latency/DSP/dropout readouts.
+- **Smart device defaults.** Picks VB-CABLE's working `CABLE Input` endpoint (skips the broken `CABLE In 16ch`) and your headset for monitoring.
+- **System tray**, single instance, and settings that persist in `%APPDATA%\LocalVoice`.
 
-## Easiest way to run it
+## Setup
 
-1. Download `LocalVoice-windows-x64.exe` from the [latest release](https://github.com/coreylallojr/localvoice/releases/latest).
-2. Double-click it. Windows may show a SmartScreen warning because the free build is not code-signed; choose **More info → Run anyway** if you downloaded it from this repository.
-3. Pick your physical microphone and headphones, then click **TEST IN HEADPHONES**. This works without a virtual driver. Wear headphones to prevent feedback.
-4. To use the changed voice in other apps, install [VB-CABLE from its official site](https://vb-audio.com/Cable/): extract its ZIP, run `VBCABLE_Setup_x64.exe` as administrator, and restart Windows.
-5. Launch LocalVoice again and click **Refresh**. It will select **CABLE Input** automatically.
-6. Click **GO LIVE**. In Discord, a game, OBS, or a browser, select **CABLE Output** as the microphone.
+1. Install [VB-CABLE](https://vb-audio.com/Cable/): extract the ZIP, run `VBCABLE_Setup_x64.exe` as administrator, and restart Windows.
+2. Download `LocalVoice.exe` from the [latest release](https://github.com/coreylallojr/localvoice/releases/latest) and run it. Windows SmartScreen may warn because the build is not code-signed; choose **More info → Run anyway**.
+3. Check the three devices: your microphone, `CABLE Input` as the virtual mic, and your headphones.
+4. Click **TEST IN HEADPHONES** (wear headphones) and pick a voice.
+5. Click **GO LIVE**. In Discord, a game or OBS, choose **CABLE Output** as the microphone.
 
-Push to talk starts off so first-run testing is not silent. Enable it when ready; F8 is the default key, and **Hotkey settings** can change the key or switch between hold and toggle behavior. Closing the window keeps LocalVoice available in the system tray; choose **Quit** in the app or tray when finished.
+Keep your Windows default playback device on your speakers or headset, not on CABLE Input. Otherwise all PC audio goes into the virtual mic.
 
-On this development machine, open a new Windows PowerShell window and run `localvoice` to launch the latest local build.
+## Build from source
 
-## Run from source
-
-Requirements: Windows 10/11 and Python 3.11 or newer.
+Requirements: Windows 10/11, [Rust](https://rustup.rs) (stable, MSVC toolchain) and the Visual Studio C++ Build Tools.
 
 ```powershell
 git clone https://github.com/coreylallojr/localvoice.git
 cd localvoice
-.\install.ps1
-.\run.ps1
+.\install.ps1     # builds release, installs to %LOCALAPPDATA%\Programs\LocalVoice, adds `localvoice`
+localvoice        # start it from any new terminal
 ```
-
-Python is not required for the packaged Windows executable.
-
-## Hotkeys
-
-| Action | Shortcut |
-| --- | --- |
-| Push to talk | F8 (configurable) |
-| Start/stop | Ctrl+Shift+Space |
-| Mute | Ctrl+Shift+M |
-| Bypass effects | Ctrl+Shift+B |
-| Previous/next character | Ctrl+Shift+Left/Right |
 
 ## Development
 
 ```powershell
-.\.venv\Scripts\python -m unittest discover -v
-.\build.ps1
+cargo test --release                   # DSP, voices, devices, hotkeys, settings
+cargo clippy --all-targets -- -D warnings
+cargo run --release -- --soak 30       # real-device self-test: tone -> CABLE loopback pitch check + 30 s soak
 ```
 
-## Advanced roadmap
+The code is in `src/`:
 
-The detailed plan for media ingestion, dataset preparation, engine benchmarking, local training, safer model packs, and a native signed virtual microphone is in [`PLANS.md`](PLANS.md). Future Codex sessions should start in this repository root and use [`PROMPTS.md`](PROMPTS.md).
+| File | Contents |
+| --- | --- |
+| `dsp/` | Voice chain, pitch shifter and effects |
+| `engine.rs` | Audio streams and drift control |
+| `app.rs` | Controller, shared by the UI, hotkeys and tray |
+| `ui.rs` | egui window |
+| `devices.rs`, `voices.rs`, `hotkeys.rs` | Devices, voices and hotkeys |
 
-LocalVoice is GPL-3.0-only because its live pitch-shifting dependency includes GPL components.
+## Credits
 
+LocalVoice builds on:
+- [cpal](https://github.com/RustAudio/cpal) for audio I/O
+- [egui/eframe](https://github.com/emilk/egui) for the UI
+- [nnnoiseless](https://github.com/jneem/nnnoiseless) (RNNoise) for noise removal
+- [realfft](https://github.com/HEnquist/realfft) for FFTs
+- [biquad](https://github.com/korken89/biquad-rs) for filters
+- [tray-icon](https://github.com/tauri-apps/tray-icon) for the system tray
+
+The pitch shifter follows Stephan Bernsee's smbPitchShift design, and the reverb is Jezar's public-domain Freeverb. The effect-chain design was informed by [Voclo](https://github.com/oonta/voclo).
+
+LocalVoice is GPL-3.0-only.
